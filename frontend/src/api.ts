@@ -87,6 +87,7 @@ export type VideoLocalizationRequest = {
 };
 
 export type VideoLocalizationArtifact = {
+  kind?: string;
   type?: string;
   name?: string;
   format?: string;

@@ -537,7 +537,7 @@ function artifactKind(value: VideoLocalizationArtifact | string) {
   if (typeof value === "string") {
     return value.toLowerCase();
   }
-  return [value.type, value.name, value.format, value.filename, value.path, value.download_url, value.url].filter(Boolean).join(" ").toLowerCase();
+  return [value.kind, value.type, value.name, value.format, value.filename, value.path, value.download_url, value.url].filter(Boolean).join(" ").toLowerCase();
 }
 
 function artifactHref(value: VideoLocalizationArtifact | string, jobId: string) {
@@ -554,10 +554,9 @@ function findArtifactUrl(job: VideoLocalizationJob | null | undefined, candidate
   }
 
   if (Array.isArray(artifacts)) {
-    const match = artifacts.find((artifact) => {
-      const kind = artifactKind(artifact);
-      return candidates.some((candidate) => kind.includes(candidate));
-    });
+    const match = candidates
+      .map((candidate) => artifacts.find((artifact) => artifactKind(artifact).includes(candidate)))
+      .find(Boolean);
     return match ? artifactHref(match, job?.job_id || "") : "";
   }
 
@@ -572,7 +571,7 @@ function videoArtifactUrls(job = state.videoJob) {
     transcript: findArtifactUrl(job, ["transcript", "vietnamese_transcript"]),
     srt: findArtifactUrl(job, ["srt", "subtitles_srt"]),
     vtt: findArtifactUrl(job, ["vtt", "subtitles_vtt"]),
-    audio: findArtifactUrl(job, ["audio", "voiceover_audio", "vietnamese_audio"], "audio"),
+    audio: findArtifactUrl(job, ["voiceover_audio", "vietnamese_audio", "dubbed_audio", "localized_audio", "audio"], "audio"),
     video: findArtifactUrl(job, ["localized_video", "final_video", "mp4"])
   };
 }
@@ -641,7 +640,14 @@ function render() {
               <strong>TTS + video</strong>
               <small>Video upload opens from the tab below</small>
             </article>
-            <button class="secondary-button" id="hero-video-button" type="button" aria-label="Open video localization workflow">Open video workflow</button>
+            <button
+              class="secondary-button"
+              id="hero-video-button"
+              type="button"
+              aria-label="Open video workflow"
+              aria-controls="workflow-panel"
+              data-testid="open-video-workflow"
+            >Open video workflow</button>
           </div>
         </div>
 
@@ -656,6 +662,13 @@ function render() {
               <span>Target Vietnamese</span>
               <span>Audio/video artifacts</span>
             </div>
+            <button
+              class="secondary-button mobile-video-shortcut"
+              id="mobile-video-button"
+              type="button"
+              aria-label="Open video workflow"
+              aria-controls="workflow-panel"
+            >Open video workflow</button>
             <div class="health-pill ${readinessLabel === "ready" ? "is-ready" : ""}" aria-live="polite">
               <span class="status-dot" aria-hidden="true"></span>
               ${escapeHtml(readinessLabel)}
@@ -677,8 +690,8 @@ function render() {
           </form>
 
           <div class="workflow-switch" role="tablist" aria-label="Prototype workflow">
-            <button id="workflow-tts" class="${state.activeWorkflow === "tts" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "tts"}" aria-controls="workflow-panel" aria-label="Open quick TTS workflow tab" data-testid="workflow-quick-tts-tab">Text to speech</button>
-            <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" aria-controls="workflow-panel" data-testid="workflow-video-localization-tab">Video localization</button>
+            <button id="workflow-tts" class="${state.activeWorkflow === "tts" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "tts"}" aria-controls="workflow-panel" aria-label="Text to speech" data-testid="workflow-quick-tts-tab">Text to speech</button>
+            <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" aria-controls="workflow-panel" aria-label="Video localization" data-testid="workflow-video-localization-tab">Video localization</button>
           </div>
 
           <div id="workflow-panel" class="workspace-grid" role="tabpanel" aria-labelledby="${state.activeWorkflow === "video" ? "workflow-video" : "workflow-tts"}">
@@ -822,7 +835,7 @@ function videoFormMarkup() {
       </div>
       <label class="field file-field command-upload">
         <span>Source video</span>
-        <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/*" aria-describedby="video-file-help" data-testid="video-file-input" />
+        <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/*" aria-label="Source video" aria-describedby="video-file-help" data-testid="video-file-input" />
         <strong>${selectedFile ? escapeHtml(selectedFile.name) : "Drop a Chinese or English video into the localization queue"}</strong>
         <small id="video-file-help">${selectedFile ? `${formatNumber(selectedFile.size, " bytes")} selected. Start localization when ready.` : "MP4, MOV, M4V, or WebM up to 250 MB. Use short clips for the fastest acceptance pass."}</small>
       </label>
@@ -845,7 +858,7 @@ function videoFormMarkup() {
       </label>
       ${state.videoError ? `<div class="error-banner" role="alert">${escapeHtml(state.videoError)}</div>` : ""}
       <div class="action-row">
-        <button class="primary-button" type="submit" data-testid="start-video-localization" ${state.videoLoading ? "disabled" : ""}>${state.videoLoading ? "Starting localization..." : "Start Vietnamese localization"}</button>
+        <button class="primary-button" type="submit" aria-label="Start Vietnamese localization" data-testid="start-video-localization" ${state.videoLoading ? "disabled" : ""}>${state.videoLoading ? "Starting localization..." : "Start Vietnamese localization"}</button>
       </div>
       <div class="pipeline-preview" aria-label="Localization pipeline stages">
         ${pipelineStepsMarkup(state.videoJob?.stage)}
@@ -1060,6 +1073,9 @@ function bindEvents() {
   });
   document.querySelector<HTMLButtonElement>("#hero-video-button")?.addEventListener("click", () => {
     switchWorkflow("video", { scroll: true, focusUpload: true });
+  });
+  document.querySelector<HTMLButtonElement>("#mobile-video-button")?.addEventListener("click", () => {
+    switchWorkflow("video", { focusUpload: true });
   });
   document.querySelector<HTMLButtonElement>("#login-button")?.addEventListener("click", () => {
     state.authMode = "login";

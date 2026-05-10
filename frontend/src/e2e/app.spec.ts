@@ -101,6 +101,14 @@ test("video localization flow renders mocked progress, previews, and mobile evid
         },
         artifacts: [
           {
+            kind: "source_video",
+            url: "/v1/video-localization/jobs/vid_e2e_001/artifacts/source.mp4"
+          },
+          {
+            kind: "source_audio",
+            url: "/v1/video-localization/jobs/vid_e2e_001/artifacts/source-audio.mp3"
+          },
+          {
             type: "vietnamese_transcript",
             format: "txt",
             download_url: "/v1/video-localization/jobs/vid_e2e_001/artifacts/vietnamese_transcript/download"
@@ -116,12 +124,12 @@ test("video localization flow renders mocked progress, previews, and mobile evid
             download_url: "/v1/video-localization/jobs/vid_e2e_001/artifacts/subtitles_vtt/download"
           },
           {
-            type: "vietnamese_audio",
+            kind: "voiceover_audio",
             format: "mp3",
             download_url: "/v1/video-localization/jobs/vid_e2e_001/artifacts/vietnamese_audio/download"
           },
           {
-            type: "localized_video",
+            kind: "localized_video",
             format: "mp4",
             download_url: "/v1/video-localization/jobs/vid_e2e_001/artifacts/localized_video/download"
           }
@@ -134,14 +142,14 @@ test("video localization flow renders mocked progress, previews, and mobile evid
   await page.goto("/");
   await expect(page.getByTestId("prototype-studio")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
-  await page.getByTestId("workflow-video-localization-tab").click();
+  await page.getByRole("tab", { name: "Video localization", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Video to Vietnamese studio" })).toBeVisible();
-  await page.setInputFiles("#video-file", {
+  await page.getByLabel("Source video", { exact: true }).setInputFiles({
     name: "sample.mp4",
     mimeType: "video/mp4",
     buffer: Buffer.from("fake mp4")
   });
-  await page.getByTestId("start-video-localization").click();
+  await page.getByRole("button", { name: "Start Vietnamese localization", exact: true }).click();
 
   await expect(page.getByTestId("video-job-id")).toHaveText("vid_e2e_001");
   await expect(page.getByLabel("Vietnamese script preview")).toContainText(backendScript);
@@ -163,16 +171,18 @@ test("video localization flow renders mocked progress, previews, and mobile evid
 test("Video localization tab exposes the upload workflow", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open video workflow", exact: true })).toBeVisible();
 
   await page.getByRole("tab", { name: "Video localization", exact: true }).click();
 
   await expect(page.getByRole("heading", { name: "Video to Vietnamese studio" })).toBeVisible();
-  await expect(page.locator('input[type="file"]')).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Video localization", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Source video", { exact: true })).toBeVisible();
   await expect(page.getByTestId("video-file-input")).toHaveAttribute("accept", /video/);
   await expect(page.getByLabel("Source language")).toBeVisible();
   await expect(page.getByLabel("Target")).toHaveValue("Vietnamese script, SRT, dub, MP4");
   await expect(page.getByLabel("Vietnamese voice")).toBeVisible();
-  await expect(page.getByTestId("start-video-localization")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start Vietnamese localization", exact: true })).toBeVisible();
 });
 
 test("video upload validation blocks unsupported files before hitting backend", async ({ page }) => {
@@ -183,15 +193,15 @@ test("video upload validation blocks unsupported files before hitting backend", 
   });
 
   await page.goto("/");
-  await page.getByTestId("workflow-video-localization-tab").click();
-  await page.setInputFiles("#video-file", {
+  await page.getByRole("tab", { name: "Video localization", exact: true }).click();
+  await page.getByLabel("Source video", { exact: true }).setInputFiles({
     name: "notes.txt",
     mimeType: "text/plain",
     buffer: Buffer.from("not a video")
   });
 
   await expect(page.getByRole("alert")).toContainText("Select an MP4, MOV, M4V, or WebM video");
-  await page.getByTestId("start-video-localization").click();
+  await page.getByRole("button", { name: "Start Vietnamese localization", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Upload a Chinese or English video");
   expect(backendCalled).toBe(false);
 });

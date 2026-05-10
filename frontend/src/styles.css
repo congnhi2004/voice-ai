@@ -489,6 +489,10 @@ button:disabled {
   min-height: 0;
 }
 
+.mobile-video-shortcut {
+  display: none;
+}
+
 .composer-panel,
 .result-panel {
   min-width: 0;
@@ -1270,6 +1274,12 @@ video {
 
   .studio-toolbar {
     padding: 8px 12px;
+  }
+
+  .mobile-video-shortcut {
+    display: inline-flex;
+    width: 100%;
+    justify-content: center;
   }
 
   .workflow-switch {
