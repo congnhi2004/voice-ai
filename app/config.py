@@ -24,6 +24,8 @@ class Settings:
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "marin"
     openai_tts_response_format: str = "wav"
+    openai_transcription_model: str = "gpt-4o-mini-transcribe"
+    openai_translation_model: str = "gpt-4o-mini"
     espeak_ng_path: str = "espeak-ng"
     audio_storage_dir: Path = Path("data/audio")
     audio_base_url: str = "http://localhost:8080"
@@ -36,7 +38,7 @@ class Settings:
     mlflow_log_audio_artifacts: bool = True
     log_raw_text: bool = False
     video_jobs_dir: Path = Path("data/video-jobs")
-    localization_provider: str = "local"
+    localization_provider: str = "auto"
     ffmpeg_path: str = "ffmpeg"
 
     @property
@@ -67,6 +69,8 @@ def load_settings() -> Settings:
         openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
         openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "marin"),
         openai_tts_response_format=os.getenv("OPENAI_TTS_RESPONSE_FORMAT", "wav").lower(),
+        openai_transcription_model=os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
+        openai_translation_model=os.getenv("OPENAI_TRANSLATION_MODEL", "gpt-4o-mini"),
         espeak_ng_path=os.getenv("ESPEAK_NG_PATH", "espeak-ng"),
         audio_storage_dir=Path(os.getenv("AUDIO_STORAGE_DIR", "data/audio")),
         audio_base_url=os.getenv("AUDIO_BASE_URL", "http://localhost:8080").rstrip("/"),
@@ -79,6 +83,6 @@ def load_settings() -> Settings:
         mlflow_log_audio_artifacts=os.getenv("MLFLOW_LOG_AUDIO_ARTIFACTS", "true").lower() in {"1", "true", "yes"},
         log_raw_text=os.getenv("LOG_RAW_TEXT", "false").lower() in {"1", "true", "yes"},
         video_jobs_dir=Path(os.getenv("VIDEO_JOBS_DIR", "data/video-jobs")),
-        localization_provider=os.getenv("LOCALIZATION_PROVIDER", "local").lower(),
+        localization_provider=os.getenv("LOCALIZATION_PROVIDER", "auto").lower(),
         ffmpeg_path=os.getenv("FFMPEG_PATH", "ffmpeg"),
     )

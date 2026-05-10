@@ -1,0 +1,94 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: voice-ai
+  labels:
+    app.kubernetes.io/name: voice-ai
+    app.kubernetes.io/component: api
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      serviceAccountName: voice-ai-run@PROJECT_ID.iam.gserviceaccount.com
+      containerConcurrency: 1
+      timeoutSeconds: 3600
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/voice-ai/voice-ai:IMAGE_TAG
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: SERVICE_VERSION
+              value: IMAGE_TAG
+            - name: TTS_PROVIDER
+              value: openai
+            - name: OPENAI_TTS_MODEL
+              value: gpt-4o-mini-tts
+            - name: OPENAI_TTS_VOICE
+              value: marin
+            - name: OPENAI_TTS_RESPONSE_FORMAT
+              value: wav
+            - name: GCP_PROJECT_ID
+              value: PROJECT_ID
+            - name: GOOGLE_CLOUD_REGION
+              value: REGION
+            - name: AUDIO_STORAGE_MODE
+              value: gcs
+            - name: GCS_AUDIO_BUCKET
+              value: VOICE_AI_AUDIO_BUCKET
+            - name: GCS_AUDIO_PREFIX
+              value: voice-ai/audio
+            - name: SIGNED_URL_TTL_SECONDS
+              value: "3600"
+            - name: VIDEO_LOCALIZATION_ENABLED
+              value: "true"
+            - name: VIDEO_STORAGE_MODE
+              value: gcs
+            - name: GCS_ARTIFACT_BUCKET
+              value: VOICE_AI_ARTIFACT_BUCKET
+            - name: GCS_SOURCE_VIDEO_PREFIX
+              value: voice-ai/video/source
+            - name: GCS_RENDERED_VIDEO_PREFIX
+              value: voice-ai/video/rendered
+            - name: GCS_INTERMEDIATE_PREFIX
+              value: voice-ai/video/intermediate
+            - name: JOB_DISPATCH_MODE
+              value: cloud_run_job
+            - name: MLFLOW_TRACKING_URI
+              value: https://mlflow.example.com
+            - name: LOG_LEVEL
+              value: INFO
+            - name: STRUCTURED_LOGS
+              value: "true"
+            - name: MAX_INPUT_CHARS
+              value: "5000"
+            - name: MAX_UPLOAD_BYTES
+              value: "524288000"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "3600"
+            - name: VIDEO_STAGE_TIMEOUT_SECONDS
+              value: "3300"
+            - name: FFMPEG_THREADS
+              value: "2"
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: voice-ai-api-keys
+                  key: latest
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: voice-ai-openai-api-key
+                  key: latest

@@ -1,0 +1,59 @@
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": {
+          "type": "Delete"
+        },
+        "condition": {
+          "age": 7,
+          "matchesPrefix": [
+            "voice-ai/video/intermediate/"
+          ]
+        }
+      },
+      {
+        "action": {
+          "type": "Delete"
+        },
+        "condition": {
+          "age": 14,
+          "matchesPrefix": [
+            "voice-ai/video/source/"
+          ]
+        }
+      },
+      {
+        "action": {
+          "type": "SetStorageClass",
+          "storageClass": "NEARLINE"
+        },
+        "condition": {
+          "age": 30,
+          "matchesPrefix": [
+            "voice-ai/video/rendered/"
+          ]
+        }
+      },
+      {
+        "action": {
+          "type": "Delete"
+        },
+        "condition": {
+          "age": 90,
+          "matchesPrefix": [
+            "voice-ai/video/rendered/"
+          ]
+        }
+      },
+      {
+        "action": {
+          "type": "AbortIncompleteMultipartUpload"
+        },
+        "condition": {
+          "age": 1
+        }
+      }
+    ]
+  }
+}

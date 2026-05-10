@@ -19,7 +19,12 @@ from .models import (
     VoiceSelection,
 )
 from .observability import MlflowTracker
-from .providers import TTSProvider
+from .providers import OpenAITTSProvider, TTSProvider
+
+
+OPENAI_AUDIO_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024
+SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v"}
+SUPPORTED_VIDEO_CONTENT_TYPES = {"video/mp4", "video/webm", "video/quicktime", "video/x-m4v"}
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,10 @@ class VideoValidationError(ValueError):
 
 class VideoRenderError(RuntimeError):
     """Raised when FFmpeg cannot create a usable localized MP4."""
+
+
+class VideoProviderError(RuntimeError):
+    """Raised when a real localization provider cannot complete a stage."""
 
 
 class LocalVideoLocalizationProvider:
@@ -62,6 +71,83 @@ class LocalVideoLocalizationProvider:
                 translated_text=translated,
             )
         ]
+
+
+class OpenAIVideoLocalizationProvider:
+    name = "openai"
+    fallback = False
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.model = f"{settings.openai_transcription_model}+{settings.openai_translation_model}+{settings.openai_tts_model}"
+        self._client = None
+        self._import_error: str | None = None
+        try:
+            from openai import OpenAI
+
+            self._openai_client = OpenAI
+        except Exception as exc:  # pragma: no cover - depends on optional dependency install
+            self._openai_client = None
+            self._import_error = str(exc)
+
+    def _get_client(self):
+        if self._openai_client is None:
+            raise VideoProviderError(f"openai unavailable: {self._import_error}")
+        if not self.settings.openai_api_key:
+            raise VideoProviderError("OPENAI_API_KEY is not set")
+        if self._client is None:
+            self._client = self._openai_client(api_key=self.settings.openai_api_key)
+        return self._client
+
+    def transcribe(self, source_language: str, audio_path: Path) -> str:
+        started = time.perf_counter()
+        language = normalize_source_language(source_language)
+        try:
+            with audio_path.open("rb") as audio_file:
+                response = self._get_client().audio.transcriptions.create(
+                    model=self.settings.openai_transcription_model,
+                    file=audio_file,
+                    language=None if language == "auto" else language,
+                    response_format="json",
+                )
+        except Exception as exc:
+            raise VideoProviderError(f"OpenAI transcription failed: {exc}") from exc
+        text = getattr(response, "text", None)
+        if text is None and isinstance(response, dict):
+            text = response.get("text")
+        if text is None:
+            text = str(response)
+        transcript = text.strip()
+        if not transcript:
+            raise VideoProviderError("OpenAI transcription returned empty text")
+        self.last_transcription_latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+        return transcript
+
+    def translate_to_vietnamese(self, transcript: str, source_language: str) -> str:
+        started = time.perf_counter()
+        prompt = (
+            "Translate and lightly adapt this Chinese or English video transcript into natural Vietnamese narration. "
+            "Return only the Vietnamese script. Do not add notes, markdown, timestamps, or labels."
+        )
+        try:
+            response = self._get_client().responses.create(
+                model=self.settings.openai_translation_model,
+                instructions=prompt,
+                input=f"Source language: {source_language}\nTranscript:\n{transcript}",
+            )
+        except Exception as exc:
+            raise VideoProviderError(f"OpenAI Vietnamese translation failed: {exc}") from exc
+        translated = getattr(response, "output_text", None)
+        if not translated:
+            translated = _extract_response_text(response)
+        translated = translated.strip()
+        if not translated:
+            raise VideoProviderError("OpenAI translation returned empty text")
+        self.last_translation_latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+        return translated
+
+    def segment(self, transcript: str, translated: str, duration_ms: int) -> list[SubtitleSegment]:
+        return make_single_segment(transcript, translated, duration_ms)
 
 
 class VideoJobStore:
@@ -97,6 +183,54 @@ def checksum(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def normalize_source_language(source_language: str) -> str:
+    value = source_language.strip().lower()
+    if value in {"auto", ""}:
+        return "auto"
+    if value.startswith("zh"):
+        return "zh"
+    if value.startswith("en"):
+        return "en"
+    raise VideoValidationError("Only Chinese or English source video is supported.")
+
+
+def validate_video_upload_metadata(filename: str | None, content_type: str | None, size_bytes: int) -> None:
+    suffix = Path(filename or "").suffix.lower()
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if suffix and suffix not in SUPPORTED_VIDEO_EXTENSIONS:
+        raise VideoValidationError("Unsupported video extension. Use MP4, WebM, MOV, or M4V.")
+    if normalized_content_type and normalized_content_type not in SUPPORTED_VIDEO_CONTENT_TYPES and not normalized_content_type.startswith("video/"):
+        raise VideoValidationError("Upload must be a supported video file.")
+    if size_bytes > OPENAI_AUDIO_UPLOAD_LIMIT_BYTES:
+        raise VideoValidationError("Uploaded video exceeds the 25 MB provider limit.")
+
+
+def make_single_segment(transcript: str, translated: str, duration_ms: int) -> list[SubtitleSegment]:
+    duration = max(1500, min(max(duration_ms, 1500), 10 * 60 * 1000))
+    return [
+        SubtitleSegment(
+            index=1,
+            start_ms=0,
+            end_ms=duration,
+            source_text=transcript,
+            translated_text=translated,
+        )
+    ]
+
+
+def _extract_response_text(response) -> str:
+    output = getattr(response, "output", None)
+    if not output:
+        return ""
+    chunks: list[str] = []
+    for item in output:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+            if text:
+                chunks.append(text)
+    return "\n".join(chunks)
 
 
 def ms_to_srt_time(ms: int) -> str:
@@ -216,6 +350,75 @@ def validate_mp4_container(path: Path, settings: Settings) -> None:
         raise VideoValidationError("Uploaded MP4 does not contain a video stream.")
 
 
+def probe_video(path: Path, settings: Settings) -> int:
+    ffprobe = _ffprobe_path(settings)
+    if not ffprobe:
+        raise VideoValidationError("ffprobe is required for real video localization.")
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-show_streams",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "ffprobe rejected the uploaded video").strip()
+        raise VideoValidationError(f"Uploaded video is not playable: {detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise VideoValidationError("Uploaded video probe timed out.") from exc
+    try:
+        data = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise VideoValidationError("Uploaded video probe returned malformed ffprobe output.") from exc
+    streams = data.get("streams", [])
+    if not any(stream.get("codec_type") == "video" for stream in streams):
+        raise VideoValidationError("Uploaded video does not contain a video stream.")
+    if not any(stream.get("codec_type") == "audio" for stream in streams):
+        raise VideoValidationError("Uploaded video does not contain an audio stream to transcribe.")
+    try:
+        duration_ms = int(float(data.get("format", {}).get("duration") or 0) * 1000)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    return max(duration_ms, 1500)
+
+
+def extract_audio(settings: Settings, input_video: Path, output_audio: Path) -> None:
+    ffmpeg = shutil.which(settings.ffmpeg_path)
+    if not ffmpeg:
+        raise VideoValidationError("ffmpeg is required to extract audio for real video localization.")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(input_video),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "64k",
+        str(output_audio),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "ffmpeg audio extraction failed").strip()
+        raise VideoRenderError(f"FFmpeg could not extract source audio: {detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise VideoRenderError("FFmpeg audio extraction timed out.") from exc
+    if not output_audio.exists() or output_audio.stat().st_size == 0:
+        raise VideoRenderError("FFmpeg did not produce extracted audio.")
+    if output_audio.stat().st_size > OPENAI_AUDIO_UPLOAD_LIMIT_BYTES:
+        raise VideoValidationError("Extracted audio exceeds the 25 MB provider upload limit.")
+
+
 def render_or_copy_video(settings: Settings, input_video: Path, vietnamese_audio: Path, subtitles: Path, output_video: Path) -> str | None:
     ffmpeg = shutil.which(settings.ffmpeg_path)
     if not ffmpeg:
@@ -268,9 +471,28 @@ def render_or_copy_video(settings: Settings, input_video: Path, vietnamese_audio
 
 def safe_source_filename(input_filename: str) -> str:
     name = Path(input_filename).name or "source.mp4"
-    if Path(name).suffix.lower() != ".mp4":
+    if Path(name).suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
         return f"{Path(name).stem or 'source'}.mp4"
     return name
+
+
+def build_video_provider(settings: Settings):
+    requested = settings.localization_provider
+    if requested == "local":
+        return LocalVideoLocalizationProvider()
+    if requested == "openai":
+        return OpenAIVideoLocalizationProvider(settings)
+    if settings.openai_api_key:
+        return OpenAIVideoLocalizationProvider(settings)
+    return LocalVideoLocalizationProvider()
+
+
+def tts_provider_for_video(settings: Settings, current_provider: TTSProvider) -> TTSProvider:
+    if settings.openai_api_key and current_provider.name != "openai":
+        openai_provider = OpenAITTSProvider(settings)
+        if openai_provider.healthcheck().ready:
+            return openai_provider
+    return current_provider
 
 
 def localize_video(
@@ -292,12 +514,22 @@ def localize_video(
     job_dir.mkdir(parents=True, exist_ok=True)
     source_path = job_dir / safe_source_filename(input_filename)
     source_path.write_bytes(uploaded_bytes)
-    validate_mp4_container(source_path, settings)
+    validate_video_upload_metadata(input_filename, input_content_type, len(uploaded_bytes))
 
-    provider = LocalVideoLocalizationProvider()
-    transcript = provider.transcribe(source_language, uploaded_bytes)
-    translated = provider.translate_to_vietnamese(transcript, source_language)
-    segments = provider.segment(transcript, translated)
+    provider = build_video_provider(settings)
+    if provider.name == "local":
+        validate_mp4_container(source_path, settings)
+        transcript = provider.transcribe(source_language, uploaded_bytes)
+        translated = provider.translate_to_vietnamese(transcript, source_language)
+        segments = provider.segment(transcript, translated)
+    else:
+        normalize_source_language(source_language)
+        duration_ms = probe_video(source_path, settings)
+        extracted_audio_path = job_dir / "source-audio.mp3"
+        extract_audio(settings, source_path, extracted_audio_path)
+        transcript = provider.transcribe(source_language, extracted_audio_path)
+        translated = provider.translate_to_vietnamese(transcript, source_language)
+        segments = provider.segment(transcript, translated, duration_ms)
     transcript_path = job_dir / "transcript.json"
     transcript_path.write_text(
         json.dumps(
@@ -312,13 +544,14 @@ def localize_video(
     )
     srt_path, vtt_path = write_subtitles(job_dir, segments)
 
+    video_tts_provider = tts_provider_for_video(settings, tts_provider)
     tts_request = SynthesizeRequest(
         text=translated,
-        voice=VoiceSelection(language_code="vi-VN", name=voice_name or "local-vi-VN-test-voice", ssml_gender="NEUTRAL"),
+        voice=VoiceSelection(language_code="vi-VN", name=voice_name or None, ssml_gender="NEUTRAL"),
         audio=AudioOptions(encoding="LINEAR16", sample_rate_hz=24000),
         metadata={"video_job_id": job_id},
     )
-    tts_result = tts_provider.synthesize(tts_request)
+    tts_result = video_tts_provider.synthesize(tts_request)
     audio_path = job_dir / "voiceover.vi.wav"
     audio_path.write_bytes(tts_result.audio_bytes)
     output_video = job_dir / "localized.vi.mp4"
@@ -330,6 +563,11 @@ def localize_video(
     latency_ms = max(1, int((time.perf_counter() - started) * 1000))
     artifacts = [
         artifact(settings, job_id, "source_video", source_path, input_content_type or "video/mp4"),
+        *(
+            [artifact(settings, job_id, "source_audio", extracted_audio_path, "audio/mpeg")]
+            if provider.name != "local"
+            else []
+        ),
         artifact(settings, job_id, "transcript", transcript_path, "application/json"),
         artifact(settings, job_id, "subtitles_srt", srt_path, "application/x-subrip"),
         artifact(settings, job_id, "subtitles_vtt", vtt_path, "text/vtt"),
@@ -339,10 +577,10 @@ def localize_video(
     mlflow = tracker.track_synthesis(
         request_id=request_id,
         job_id=job_id,
-        provider="video-local",
-        fallback=True,
+        provider=f"video-{provider.name}",
+        fallback=provider.fallback,
         environment=settings.environment,
-        voice_name=voice_name or "local-vi-VN-test-voice",
+        voice_name=voice_name or getattr(video_tts_provider, "settings", settings).openai_tts_voice if video_tts_provider.name == "openai" else voice_name or "local-vi-VN-test-voice",
         language_code="vi-VN",
         audio_encoding="LINEAR16",
         speaking_rate=1.0,

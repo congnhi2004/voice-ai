@@ -90,20 +90,55 @@ docker compose --profile worker up --build
 
 ## Manual Deploy
 
-Use `scripts/cloud-run-deploy.sh` after exporting required variables:
+Use the dry-run-first operator script after exporting required variables. It prints the exact commands by default and only deploys when `DRY_RUN=0`.
 
 ```bash
 export GCP_PROJECT_ID=my-project
 export REGION=us-central1
+export ENVIRONMENT=staging
 export SERVICE_NAME=voice-ai
 export ARTIFACT_REPOSITORY=voice-ai
 export CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=voice-ai-run@my-project.iam.gserviceaccount.com
 export GCS_AUDIO_BUCKET=my-voice-ai-audio
 export GCS_ARTIFACT_BUCKET=my-voice-ai-artifacts
-export CLOUD_TASKS_QUEUE=voice-ai-video
+export API_KEYS_SECRET_NAME=voice-ai-api-keys
+export OPENAI_API_KEY_SECRET_NAME=voice-ai-openai-api-key
 export MLFLOW_TRACKING_URI=https://mlflow.example.com
-./scripts/cloud-run-deploy.sh
+deploy/cloud-run-deploy-operator.sh
+DRY_RUN=0 deploy/cloud-run-deploy-operator.sh
 ```
+
+Do not set `GOOGLE_APPLICATION_CREDENTIALS` for Cloud Run service or job deploys. Use GitHub Workload Identity Federation in CI/CD and Cloud Run runtime service identity in deployed workloads.
+
+Templates:
+
+- `deploy/cloud-run-service.yaml.template`: service shape for review or `gcloud run services replace` after placeholder substitution.
+- `deploy/cloud-run-video-job.yaml.template`: Cloud Run job shape for off-request video processing.
+- `deploy/secret-manager-map.md`: secret names, GitHub variables/secrets, and IAM.
+
+## GCS Lifecycle And Signed URLs
+
+Apply lifecycle policies after bucket creation:
+
+```bash
+gcloud storage buckets update "gs://${GCS_AUDIO_BUCKET}" \
+  --lifecycle-file=deploy/gcs-audio-lifecycle.json
+gcloud storage buckets update "gs://${GCS_ARTIFACT_BUCKET}" \
+  --lifecycle-file=deploy/gcs-video-artifact-lifecycle.json
+```
+
+Signed URLs should be time limited and generated for specific objects. Google Cloud Storage signed URLs grant access to whoever has the URL until expiration, so use short TTLs for user downloads and never log full URLs in structured logs. The app config uses `SIGNED_URL_TTL_SECONDS=3600` as the production default.
+
+Keep source video, intermediate files, rendered video, and generated audio in private buckets/prefixes. Public access should come through application authorization plus signed URLs, not public bucket ACLs.
+
+## GitHub Actions Deployment
+
+`.github/workflows/deploy-cloud-run.yml` is manual through `workflow_dispatch` and environment-gated. Required setup:
+
+- Configure GitHub OIDC to Google Cloud.
+- Add environment secrets `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, `API_KEYS_SECRET_NAME`, and `OPENAI_API_KEY_SECRET_NAME`.
+- Add environment variables listed in `deploy/secret-manager-map.md`.
+- Dispatch the workflow for `staging`; run `deploy/release-smoke-checklist.md`; then dispatch `production` with the same image tag or commit SHA.
 
 ## Video Localization Operations
 

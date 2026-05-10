@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.providers import LocalFallbackProvider, OpenAITTSProvider, build_provider
+from app.video_localization import OpenAIVideoLocalizationProvider
 
 
 def make_client(tmp_path: Path, **overrides) -> TestClient:
@@ -74,9 +75,58 @@ class FakeSpeech:
         return FakeSpeechResponse(self.content)
 
 
+class FakeTranscriptionResponse:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class FakeTranscriptions:
+    def __init__(self, text: str = "Hello from the uploaded English video.", error: Exception | None = None):
+        self.text = text
+        self.error = error
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return FakeTranscriptionResponse(self.text)
+
+
+class FakeResponsesResult:
+    def __init__(self, output_text: str):
+        self.output_text = output_text
+
+
+class FakeResponses:
+    def __init__(self, output_text: str = "Xin chao tu video da tai len.", error: Exception | None = None):
+        self.output_text = output_text
+        self.error = error
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return FakeResponsesResult(self.output_text)
+
+
 class FakeOpenAIClient:
-    def __init__(self, speech: FakeSpeech):
-        self.audio = type("Audio", (), {"speech": speech})()
+    def __init__(
+        self,
+        speech: FakeSpeech | None = None,
+        transcriptions: FakeTranscriptions | None = None,
+        responses: FakeResponses | None = None,
+    ):
+        self.audio = type(
+            "Audio",
+            (),
+            {
+                "speech": speech or FakeSpeech(),
+                "transcriptions": transcriptions or FakeTranscriptions(),
+            },
+        )()
+        self.responses = responses or FakeResponses()
 
 
 FAKE_MP4_BYTES = b"\x00\x00\x00\x18ftypmp42demo-video"
@@ -482,6 +532,83 @@ def test_video_localization_demo_workflow_creates_artifacts_and_status(tmp_path:
             assert b'"segments"' in download.content
         if artifact["kind"] == "localized_video":
             assert download.content.startswith(b"\x00\x00\x00")
+
+
+def test_video_localization_auto_uses_openai_pipeline_when_key_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    speech = FakeSpeech(content=b"RIFFmock-openai-video-vietnamese-speech")
+    transcriptions = FakeTranscriptions(text="Welcome to the product demo.")
+    responses = FakeResponses(output_text="Chao mung ban den voi ban demo san pham.")
+    fake_client = FakeOpenAIClient(speech=speech, transcriptions=transcriptions, responses=responses)
+    monkeypatch.setattr(OpenAIVideoLocalizationProvider, "_get_client", lambda self: fake_client)
+    monkeypatch.setattr(OpenAITTSProvider, "_get_client", lambda self: fake_client)
+    monkeypatch.setattr("app.video_localization.probe_video", lambda path, settings: 3200)
+    monkeypatch.setattr("app.video_localization.extract_audio", lambda settings, source, output: output.write_bytes(b"ID3source-audio"))
+
+    def fake_render(settings, source, audio, subtitles, output):
+        output.write_bytes(source.read_bytes())
+        return None
+
+    monkeypatch.setattr("app.video_localization.render_or_copy_video", fake_render)
+    client = make_client(tmp_path, tts_provider="local", openai_api_key="dummy_openai_video_key")
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi", "voice_name": "marin"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+        headers={"X-Request-ID": "req_openai_video"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"]["name"] == "openai"
+    assert body["provider"]["fallback"] is False
+    assert "gpt-4o-mini-transcribe" in body["provider"]["model"]
+    assert body["segments"][0]["source_text"] == "Welcome to the product demo."
+    assert body["segments"][0]["translated_text"] == "Chao mung ban den voi ban demo san pham."
+    artifact_kinds = {artifact["kind"] for artifact in body["artifacts"]}
+    assert {"source_audio", "voiceover_audio", "localized_video"} <= artifact_kinds
+    assert transcriptions.calls[0]["model"] == "gpt-4o-mini-transcribe"
+    assert transcriptions.calls[0]["language"] == "en"
+    assert responses.calls[0]["model"] == "gpt-4o-mini"
+    assert speech.calls[0]["model"] == "gpt-4o-mini-tts"
+    assert speech.calls[0]["voice"] == "marin"
+    assert "dummy_openai_video_key" not in response.text
+
+
+def test_video_localization_provider_errors_redact_openai_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    secret = "dummy_openai_video_secret"
+    fake_client = FakeOpenAIClient(transcriptions=FakeTranscriptions(error=RuntimeError(f"bad key {secret}")))
+    monkeypatch.setattr(OpenAIVideoLocalizationProvider, "_get_client", lambda self: fake_client)
+    monkeypatch.setattr("app.video_localization.probe_video", lambda path, settings: 3200)
+    monkeypatch.setattr("app.video_localization.extract_audio", lambda settings, source, output: output.write_bytes(b"ID3source-audio"))
+    client = make_client(tmp_path, tts_provider="local", openai_api_key=secret)
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "video_provider_failed"
+    assert secret not in response.text
+    assert "[redacted]" in response.text
+    assert secret not in caplog.text
+
+
+def test_video_localization_rejects_oversized_upload_before_provider(tmp_path: Path):
+    client = make_client(tmp_path, openai_api_key="dummy_openai_video_key")
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("huge.mp4", b"0" * (25 * 1024 * 1024 + 1), "video/mp4")},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "unsupported_video_upload"
+    assert "25 MB" in body["error"]["message"]
 
 
 def test_public_video_artifact_urls_do_not_use_audio_prefix(tmp_path: Path, valid_mp4_bytes: bytes, fake_espeak_ng: list[list[str]]):

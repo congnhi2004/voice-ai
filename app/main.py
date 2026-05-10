@@ -20,7 +20,16 @@ from .models import AudioInfo, DemoAuthRequest, DemoLoginRequest, ObservabilityI
 from .observability import MlflowTracker
 from .providers import UnsupportedVoiceError, build_provider
 from .storage import LocalAudioStorage
-from .video_localization import VideoJobStore, VideoRenderError, VideoValidationError, localize_video
+from .video_localization import (
+    OPENAI_AUDIO_UPLOAD_LIMIT_BYTES,
+    VideoJobStore,
+    VideoProviderError,
+    VideoRenderError,
+    VideoValidationError,
+    build_video_provider,
+    localize_video,
+    validate_video_upload_metadata,
+)
 
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 logger = logging.getLogger("voice_ai")
@@ -193,7 +202,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "mode": settings.localization_provider,
                 "ready": True,
                 "ffmpeg_available": shutil.which(settings.ffmpeg_path) is not None,
-                "detail": "local demo mode can create artifacts without ffmpeg; real muxing requires ffmpeg",
+                "provider": build_video_provider(settings).name,
+                "detail": "auto mode uses OpenAI when OPENAI_API_KEY is set; local fallback remains available without credentials",
             },
         }
         return JSONResponse(status_code=200 if ready else 503, content=body)
@@ -327,13 +337,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         if target_language.lower() not in {"vi", "vi-vn"}:
             return problem("unsupported_target_language", "Only Vietnamese target localization is supported in this backend slice.", request_id_var.get(), 400, {"target_language": target_language})
-        if not (file.content_type or "").startswith("video/"):
-            return problem("unsupported_media_type", "Upload must be a video/* file.", request_id_var.get(), 400, {"content_type": file.content_type})
         job_id = f"vid_{uuid.uuid4().hex}"
         response.headers["X-Job-ID"] = job_id
         uploaded_bytes = await file.read()
         if not uploaded_bytes:
             return problem("empty_upload", "Uploaded video is empty.", request_id_var.get(), 400, job_id=job_id)
+        try:
+            validate_video_upload_metadata(file.filename, file.content_type, len(uploaded_bytes))
+        except VideoValidationError as exc:
+            return problem(
+                "unsupported_video_upload",
+                str(exc),
+                request_id_var.get(),
+                400,
+                {"filename": file.filename, "content_type": file.content_type, "max_bytes": OPENAI_AUDIO_UPLOAD_LIMIT_BYTES},
+                job_id=job_id,
+            )
         try:
             status_body = localize_video(
                 settings=settings,
@@ -368,9 +387,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except VideoRenderError as exc:
             logger.exception("video_render_failed", extra={"request_id": request_id_var.get(), "job_id": job_id, "error_code": "video_render_failed"})
             return problem("video_render_failed", str(exc), request_id_var.get(), 503, {"filename": file.filename}, job_id=job_id)
+        except VideoProviderError as exc:
+            logger.exception("video_provider_failed", extra={"request_id": request_id_var.get(), "job_id": job_id, "error_code": "video_provider_failed"})
+            return problem(
+                "video_provider_failed",
+                "Video localization provider failed.",
+                request_id_var.get(),
+                503,
+                {"error": redact_configured_secrets(str(exc), settings)},
+                job_id=job_id,
+            )
         except Exception as exc:
             logger.exception("video_localization_failed", extra={"request_id": request_id_var.get(), "job_id": job_id, "error_code": "video_localization_failed"})
-            return problem("video_localization_failed", "Video localization failed.", request_id_var.get(), 500, {"error": str(exc)}, job_id=job_id)
+            return problem("video_localization_failed", "Video localization failed.", request_id_var.get(), 500, {"error": redact_configured_secrets(str(exc), settings)}, job_id=job_id)
 
     @app.get("/v1/video-localization/jobs/{job_id}", dependencies=[Depends(require_api_key)])
     async def get_video_localization_job(job_id: str):

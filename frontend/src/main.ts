@@ -2,7 +2,9 @@ import {
   ApiError,
   ReadinessResponse,
   SynthesizeResponse,
+  VideoLocalizationArtifact,
   VideoLocalizationJob,
+  VideoLocalizationSegment,
   Voice,
   VoiceAiClient,
   normalizeBaseUrl,
@@ -88,6 +90,7 @@ type VideoHistoryItem = {
   targetVoice: string;
   fileName: string;
   audioUrl: string;
+  transcriptUrl: string;
   videoUrl: string;
   srtUrl: string;
   createdAt: string;
@@ -154,10 +157,8 @@ const fallbackVoices: Voice[] = [
   }
 ];
 
-const demoScript =
-  "Xin chao. Day la ban thuyet minh tieng Viet duoc tao tu video goc tieng Trung hoac tieng Anh. Ban co the xem lai loi dich, phu de, giong doc va tep xuat ban truoc khi tai ve.";
-const demoSrt =
-  "1\n00:00:00,000 --> 00:00:04,000\nXin chao. Day la ban thuyet minh tieng Viet.\n\n2\n00:00:04,000 --> 00:00:08,000\nKiem tra phu de, giong doc va video cuoi cung truoc khi tai ve.";
+const videoUploadLimitBytes = 250 * 1024 * 1024;
+const acceptedVideoExtensions = [".mp4", ".mov", ".webm", ".m4v"];
 
 const state: AppState = {
   activeWorkflow: "tts",
@@ -259,6 +260,30 @@ function formatError(error: unknown) {
     return details ? `${error.message} (${details})` : error.message;
   }
   return error instanceof Error ? error.message : "Unexpected error";
+}
+
+function validateVideoFile(file: File | null) {
+  if (!file) {
+    return "Upload a Chinese or English video before starting localization. Use the quick TTS tab if you only want a no-file audio test.";
+  }
+
+  const name = file.name.toLowerCase();
+  const hasAcceptedExtension = acceptedVideoExtensions.some((extension) => name.endsWith(extension));
+  const hasAcceptedMime = file.type === "" || file.type.startsWith("video/");
+
+  if (!hasAcceptedMime || !hasAcceptedExtension) {
+    return "Select an MP4, MOV, M4V, or WebM video. Browser hints are not security validation; the backend will still verify the upload.";
+  }
+
+  if (file.size <= 0) {
+    return "The selected video is empty. Choose a source file with audio to localize.";
+  }
+
+  if (file.size > videoUploadLimitBytes) {
+    return "The selected video is larger than the 250 MB MVP upload limit.";
+  }
+
+  return "";
 }
 
 async function refreshStatus() {
@@ -371,8 +396,9 @@ async function synthesize() {
 }
 
 async function startVideoLocalization() {
-  if (!state.videoFile) {
-    state.videoError = "Upload a Chinese or English video before starting localization. Use the quick TTS tab if you only want a no-file audio test.";
+  const validationError = validateVideoFile(state.videoFile);
+  if (validationError) {
+    state.videoError = validationError;
     render();
     return;
   }
@@ -391,7 +417,7 @@ async function startVideoLocalization() {
   try {
     const response = await getClient().startVideoLocalization(
       {
-        video: state.videoFile,
+        video: state.videoFile!,
         source_language: state.videoSourceLanguage,
         target_language: "vi",
         target_voice_name: voice.name,
@@ -410,22 +436,8 @@ async function startVideoLocalization() {
       window.setTimeout(() => void pollVideoJob(response.job_id), 1200);
     }
   } catch (error) {
-    state.videoError = `${formatError(error)} Video backend may not be available yet. The prototype UI stays usable for upload, language, voice, subtitle, and artifact review testing.`;
-    state.videoJob = {
-      job_id: "demo_video_preview",
-      status: "needs_review",
-      progress: 58,
-      stage: "Demo review state: backend unavailable",
-      source_language: state.videoSourceLanguage,
-      target_language: "vi",
-      script: {
-        vietnamese_text: demoScript,
-        srt: demoSrt,
-        editable: false
-      }
-    };
-    state.videoScript = demoScript;
-    state.videoSrt = demoSrt;
+    state.videoError = formatError(error);
+    state.videoJob = null;
   } finally {
     state.videoLoading = false;
     render();
@@ -450,10 +462,55 @@ function isFinalVideoStatus(status: string) {
   return ["succeeded", "failed", "needs_review", "canceled"].includes(status);
 }
 
+function formatTimestampFromMs(value?: number) {
+  const ms = Math.max(0, value ?? 0);
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1000);
+  const millis = Math.floor(ms % 1000);
+  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds
+    .toString()
+    .padStart(2, "0")},${millis.toString().padStart(3, "0")}`;
+}
+
+function segmentText(segment: VideoLocalizationSegment) {
+  return segment.vietnamese_text || segment.translated_text || segment.text || "";
+}
+
+function videoScriptPreview(job: VideoLocalizationJob) {
+  if (job.script?.vietnamese_text) {
+    return job.script.vietnamese_text;
+  }
+
+  const translatedSegments = job.segments?.map(segmentText).filter(Boolean) || [];
+  return translatedSegments.join("\n\n");
+}
+
+function videoSrtPreview(job: VideoLocalizationJob) {
+  if (job.script?.srt) {
+    return job.script.srt;
+  }
+
+  const segments = job.segments?.filter((segment) => segmentText(segment)) || [];
+  if (!segments.length) {
+    return "";
+  }
+
+  return segments
+    .map((segment, index) => {
+      const start = segment.start || formatTimestampFromMs(segment.start_ms);
+      const end = segment.end || formatTimestampFromMs(segment.end_ms ?? (segment.start_ms ?? 0) + 2500);
+      return `${segment.index ?? index + 1}\n${start} --> ${end}\n${segmentText(segment)}`;
+    })
+    .join("\n\n");
+}
+
 function applyVideoJob(job: VideoLocalizationJob) {
   state.videoJob = job;
-  state.videoScript = job.script?.vietnamese_text || state.videoScript;
-  state.videoSrt = job.script?.srt || state.videoSrt;
+  const scriptPreview = videoScriptPreview(job);
+  const srtPreview = videoSrtPreview(job);
+  state.videoScript = scriptPreview || state.videoScript;
+  state.videoSrt = srtPreview || state.videoSrt;
 
   if (job.job_id && isFinalVideoStatus(job.status)) {
     const artifacts = videoArtifactUrls(job);
@@ -463,8 +520,9 @@ function applyVideoJob(job: VideoLocalizationJob) {
         status: job.status,
         sourceLanguage: state.videoSourceLanguage,
         targetVoice: selectedVideoVoice().name,
-        fileName: state.videoFile?.name || "Uploaded video",
+        fileName: job.input_filename || state.videoFile?.name || "Uploaded video",
         audioUrl: artifacts.audio,
+        transcriptUrl: artifacts.transcript,
         videoUrl: artifacts.video,
         srtUrl: artifacts.srt,
         createdAt: new Date().toISOString()
@@ -475,14 +533,62 @@ function applyVideoJob(job: VideoLocalizationJob) {
   }
 }
 
-function videoArtifactUrls(job = state.videoJob) {
+function artifactKind(value: VideoLocalizationArtifact | string) {
+  if (typeof value === "string") {
+    return value.toLowerCase();
+  }
+  return [value.type, value.name, value.format, value.filename, value.path, value.download_url, value.url].filter(Boolean).join(" ").toLowerCase();
+}
+
+function artifactHref(value: VideoLocalizationArtifact | string, jobId: string) {
+  if (typeof value === "string") {
+    return `${normalizeBaseUrl(state.baseUrl)}/v1/video-localization/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(value)}`;
+  }
+  return resolveArtifactUrl(state.baseUrl, value.download_url || value.url, value.path || value.filename);
+}
+
+function findArtifactUrl(job: VideoLocalizationJob | null | undefined, candidates: string[], route = "artifacts") {
   const artifacts = job?.artifacts;
+  if (!artifacts) {
+    return "";
+  }
+
+  if (Array.isArray(artifacts)) {
+    const match = artifacts.find((artifact) => {
+      const kind = artifactKind(artifact);
+      return candidates.some((candidate) => kind.includes(candidate));
+    });
+    return match ? artifactHref(match, job?.job_id || "") : "";
+  }
+
+  const keyedArtifacts = artifacts as Extract<VideoLocalizationJob["artifacts"], Record<string, string | undefined>>;
+  const urlKey = `${candidates[0]}_url` as keyof typeof keyedArtifacts;
+  const pathKey = `${candidates[0]}_path` as keyof typeof keyedArtifacts;
+  return resolveArtifactUrl(state.baseUrl, keyedArtifacts[urlKey], keyedArtifacts[pathKey], route);
+}
+
+function videoArtifactUrls(job = state.videoJob) {
   return {
-    transcript: resolveArtifactUrl(state.baseUrl, artifacts?.transcript_url, artifacts?.transcript_path),
-    srt: resolveArtifactUrl(state.baseUrl, artifacts?.srt_url, artifacts?.srt_path),
-    audio: resolveArtifactUrl(state.baseUrl, artifacts?.audio_url, artifacts?.audio_path, "audio"),
-    video: resolveArtifactUrl(state.baseUrl, artifacts?.video_url, artifacts?.video_path)
+    transcript: findArtifactUrl(job, ["transcript", "vietnamese_transcript"]),
+    srt: findArtifactUrl(job, ["srt", "subtitles_srt"]),
+    vtt: findArtifactUrl(job, ["vtt", "subtitles_vtt"]),
+    audio: findArtifactUrl(job, ["audio", "voiceover_audio", "vietnamese_audio"], "audio"),
+    video: findArtifactUrl(job, ["localized_video", "final_video", "mp4"])
   };
+}
+
+function switchWorkflow(workflow: Workflow, options: { scroll?: boolean; focusUpload?: boolean } = {}) {
+  state.activeWorkflow = workflow;
+  render();
+
+  window.requestAnimationFrame(() => {
+    if (options.scroll) {
+      document.querySelector("#studio")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (workflow === "video" && options.focusUpload) {
+      document.querySelector<HTMLInputElement>("#video-file")?.focus();
+    }
+  });
 }
 
 function render() {
@@ -510,34 +616,45 @@ function render() {
     </header>
 
     <main>
-      <section id="prototype" class="hero-studio" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow">Text to real voice in the first screen</p>
-          <h1 id="hero-title">Voice AI studio that speaks immediately</h1>
-          <p class="hero-lede">
-            Paste a script, choose an OpenAI voice, tune delivery, generate audio, replay it, and download the result before reading anything else.
-          </p>
-          <div class="hero-actions">
-            <a class="primary-link" href="#studio">Generate voice now</a>
-            <button class="secondary-button" id="hero-video-button" type="button" aria-label="Open video localization workflow">Video localization</button>
+      <section id="prototype" class="studio-stage" aria-labelledby="hero-title">
+        <div class="studio-intro">
+          <div>
+            <p class="eyebrow">Production voice workspace</p>
+            <h1 id="hero-title">Generate, review, and ship synthetic voice from one console.</h1>
+            <p class="hero-lede">
+              The first screen is the product: backend status, script input, voice controls, generation, playback, download, and a visible path into Vietnamese video localization.
+            </p>
           </div>
-          <div class="proof-strip" aria-label="Product capabilities">
-            <span><b>Provider</b> Live OpenAI status and local fallback visibility</span>
-            <span><b>Control</b> Voice, language, format, rate, pitch, and gain</span>
-            <span><b>Output</b> Native player, job metadata, history, and download</span>
+          <div class="status-rail" aria-label="Live studio status">
+            <article>
+              <span>API</span>
+              <strong>${escapeHtml(readinessLabel)}</strong>
+              <small>${escapeHtml(state.baseUrl)}</small>
+            </article>
+            <article>
+              <span>Provider</span>
+              <strong>${escapeHtml(provider?.name || "checking")}</strong>
+              <small>${provider?.fallback ? "fallback route visible" : "OpenAI path when ready"}</small>
+            </article>
+            <article>
+              <span>Workflows</span>
+              <strong>TTS + video</strong>
+              <small>Video upload opens from the tab below</small>
+            </article>
+            <button class="secondary-button" id="hero-video-button" type="button" aria-label="Open video localization workflow">Open video workflow</button>
           </div>
         </div>
 
         <section id="studio" class="studio-shell" aria-label="Prototype workspace" data-testid="prototype-studio">
           <div class="studio-toolbar">
             <div>
-              <span class="mini-label">Demo workspace</span>
-              <strong>${state.demoUser ? escapeHtml(state.demoUser) : "Public prototype"}</strong>
+              <span class="mini-label">Live studio</span>
+              <strong>${state.demoUser ? escapeHtml(state.demoUser) : "Public workspace"}</strong>
             </div>
             <div class="studio-stats" aria-label="Prototype status summary">
-              <span>OpenAI voices</span>
-              <span>Target vi-VN</span>
-              <span>Audio export</span>
+              <span>${state.voices.length.toLocaleString()} voices loaded</span>
+              <span>Target Vietnamese</span>
+              <span>Audio/video artifacts</span>
             </div>
             <div class="health-pill ${readinessLabel === "ready" ? "is-ready" : ""}" aria-live="polite">
               <span class="status-dot" aria-hidden="true"></span>
@@ -560,11 +677,11 @@ function render() {
           </form>
 
           <div class="workflow-switch" role="tablist" aria-label="Prototype workflow">
-            <button id="workflow-tts" class="${state.activeWorkflow === "tts" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "tts"}" aria-label="Open quick TTS workflow tab" data-testid="workflow-quick-tts-tab">Quick TTS</button>
-            <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" data-testid="workflow-video-localization-tab">Video localization</button>
+            <button id="workflow-tts" class="${state.activeWorkflow === "tts" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "tts"}" aria-controls="workflow-panel" aria-label="Open quick TTS workflow tab" data-testid="workflow-quick-tts-tab">Text to speech</button>
+            <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" aria-controls="workflow-panel" data-testid="workflow-video-localization-tab">Video localization</button>
           </div>
 
-          <div class="workspace-grid">
+          <div id="workflow-panel" class="workspace-grid" role="tabpanel" aria-labelledby="${state.activeWorkflow === "video" ? "workflow-video" : "workflow-tts"}">
             <div class="composer-panel">
               ${state.activeWorkflow === "video" ? videoFormMarkup() : ttsFormMarkup()}
             </div>
@@ -657,11 +774,6 @@ function ttsFormMarkup() {
         <label><input type="radio" name="mode" value="text" ${state.mode === "text" ? "checked" : ""} /> Plain text</label>
         <label><input type="radio" name="mode" value="ssml" ${state.mode === "ssml" ? "checked" : ""} /> SSML</label>
       </div>
-      <label class="field">
-        <span>${state.mode === "ssml" ? "SSML input" : "Script input"}</span>
-        <textarea id="text-input" maxlength="5000" rows="10">${escapeHtml(state.text)}</textarea>
-        <small id="character-count">${charCount.toLocaleString()} / 5,000 characters</small>
-      </label>
       <div class="control-grid">
         <label class="field"><span>Voice</span><select id="voice-select">${state.voices
           .map((item) => `<option value="${escapeHtml(item.name)}" ${item.name === state.selectedVoiceName ? "selected" : ""}>${escapeHtml(voiceLabel(item))}</option>`)
@@ -674,6 +786,16 @@ function ttsFormMarkup() {
           .join("")}</select></label>
         <label class="field"><span>Client reference</span><input id="client-reference-id" type="text" value="${escapeHtml(state.clientReferenceId)}" placeholder="script-123" /></label>
       </div>
+      ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ""}
+      <div class="action-row action-row-primary">
+        <button class="primary-button" type="submit" data-testid="generate-tts-preview" ${state.synthLoading ? "disabled" : ""}>${state.synthLoading ? "Synthesizing..." : "Generate TTS preview"}</button>
+        <p class="request-note">Native audio controls, no autoplay, downloadable when backend returns an artifact.</p>
+      </div>
+      <label class="field">
+        <span>${state.mode === "ssml" ? "SSML input" : "Script input"}</span>
+        <textarea id="text-input" maxlength="5000" rows="5">${escapeHtml(state.text)}</textarea>
+        <small id="character-count">${charCount.toLocaleString()} / 5,000 characters</small>
+      </label>
       <div class="voice-disclosure" role="note">
         <strong>AI voice disclosure</strong>
         <span>Generated audio uses synthetic voice technology. Keep consent, labeling, and commercial usage rules visible in your publishing workflow.</span>
@@ -682,11 +804,6 @@ function ttsFormMarkup() {
         ${rangeControl("speaking-rate", "Speaking rate", state.speakingRate, 0.25, 4, 0.05, "x")}
         ${rangeControl("pitch", "Pitch", state.pitch, -20, 20, 0.5, " st")}
         ${rangeControl("volume-gain-db", "Volume gain", state.volumeGainDb, -16, 16, 0.5, " dB")}
-      </div>
-      ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ""}
-      <div class="action-row">
-        <button class="primary-button" type="submit" data-testid="generate-tts-preview" ${state.synthLoading ? "disabled" : ""}>${state.synthLoading ? "Synthesizing..." : "Generate TTS preview"}</button>
-        <p class="request-note">Native audio controls, no autoplay, downloadable when backend returns an artifact.</p>
       </div>
     </form>
   `;
@@ -705,9 +822,9 @@ function videoFormMarkup() {
       </div>
       <label class="field file-field command-upload">
         <span>Source video</span>
-        <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/*" aria-describedby="video-file-help" />
+        <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/*" aria-describedby="video-file-help" data-testid="video-file-input" />
         <strong>${selectedFile ? escapeHtml(selectedFile.name) : "Drop a Chinese or English video into the localization queue"}</strong>
-        <small id="video-file-help">${selectedFile ? `${formatNumber(selectedFile.size, " bytes")} selected. Start localization when ready.` : "MP4, MOV, or WebM. Use a short clip for the fastest prototype feedback."}</small>
+        <small id="video-file-help">${selectedFile ? `${formatNumber(selectedFile.size, " bytes")} selected. Start localization when ready.` : "MP4, MOV, M4V, or WebM up to 250 MB. Use short clips for the fastest acceptance pass."}</small>
       </label>
       <div class="control-grid video-controls">
         <label class="field"><span>Source language</span><select id="video-source-language">
@@ -729,7 +846,6 @@ function videoFormMarkup() {
       ${state.videoError ? `<div class="error-banner" role="alert">${escapeHtml(state.videoError)}</div>` : ""}
       <div class="action-row">
         <button class="primary-button" type="submit" data-testid="start-video-localization" ${state.videoLoading ? "disabled" : ""}>${state.videoLoading ? "Starting localization..." : "Start Vietnamese localization"}</button>
-        <button class="secondary-button" id="load-demo-review" type="button">View demo review state</button>
       </div>
       <div class="pipeline-preview" aria-label="Localization pipeline stages">
         ${pipelineStepsMarkup(state.videoJob?.stage)}
@@ -774,6 +890,9 @@ function videoOutputMarkup() {
   const job = state.videoJob;
   const artifacts = videoArtifactUrls(job);
   const progress = Math.max(0, Math.min(100, Math.round(job?.progress ?? (job?.status === "succeeded" ? 100 : 0))));
+  const scriptEditable = job?.script?.editable === true;
+  const jobError = typeof job?.error === "string" ? job.error : job?.error?.message;
+  const warnings = [...(job?.warnings || []), ...(job?.observability?.warnings || [])];
   return `
     <section class="panel-section">
       <div class="section-heading"><h2>Localization output</h2><span>${escapeHtml(job?.status || "Ready to test")}</span></div>
@@ -782,29 +901,35 @@ function videoOutputMarkup() {
           ? skeletonOutput()
           : job
             ? `<div class="video-job-card">
-                <div class="progress-shell" aria-label="Video localization progress"><span style="width: ${progress}%"></span></div>
+                <div class="progress-shell" aria-label="Video localization progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" role="progressbar"><span style="width: ${progress}%"></span></div>
                 <p class="stage-line">${escapeHtml(job.stage || job.message || "Waiting for backend status updates.")}</p>
+                ${jobError ? `<div class="error-banner" role="alert">${escapeHtml(jobError)}</div>` : ""}
+                ${warnings.length ? `<div class="warning-list" role="note">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
                 <div class="agent-plan" aria-label="Processing plan">
                   ${pipelineStepsMarkup(job.stage)}
                 </div>
                 <div class="artifact-grid">
                   ${downloadButton("Transcript", artifacts.transcript)}
                   ${downloadButton("SRT", artifacts.srt)}
+                  ${downloadButton("VTT", artifacts.vtt)}
                   ${downloadButton("Vietnamese audio", artifacts.audio)}
                   ${downloadButton("Final MP4", artifacts.video)}
                 </div>
                 ${artifacts.audio ? `<audio controls preload="metadata" src="${escapeAttribute(artifacts.audio)}">Your browser does not support audio playback.</audio>` : ""}
                 ${artifacts.video ? `<video controls preload="metadata" src="${escapeAttribute(artifacts.video)}">Your browser does not support video playback.</video>` : `<div class="video-placeholder">Final video preview appears here when the backend publishes MP4 output.</div>`}
-                <label class="field"><span>Vietnamese script preview</span><textarea id="video-script-editor" rows="6" placeholder="Vietnamese script appears here after transcription and translation.">${escapeHtml(state.videoScript)}</textarea></label>
-                <label class="field"><span>Vietnamese SRT preview</span><textarea id="video-srt-editor" rows="6" placeholder="Timed Vietnamese subtitles appear here.">${escapeHtml(state.videoSrt)}</textarea></label>
+                <label class="field"><span>Vietnamese script preview</span><textarea id="video-script-editor" rows="6" placeholder="Vietnamese script appears here after transcription and translation." ${scriptEditable ? "" : "readonly"}>${escapeHtml(state.videoScript)}</textarea></label>
+                <label class="field"><span>Vietnamese SRT preview</span><textarea id="video-srt-editor" rows="6" placeholder="Timed Vietnamese subtitles appear here." ${scriptEditable ? "" : "readonly"}>${escapeHtml(state.videoSrt)}</textarea></label>
                 <dl class="metadata-list">
                   <div><dt>Job ID</dt><dd data-testid="video-job-id">${escapeHtml(job.job_id)}</dd></div>
                   <div><dt>Source</dt><dd>${escapeHtml(job.source_language || state.videoSourceLanguage)}</dd></div>
                   <div><dt>Target</dt><dd>${escapeHtml(job.target_language || "vi")}</dd></div>
+                  <div><dt>Provider</dt><dd>${escapeHtml(job.provider?.name || "Not reported")}${job.provider?.fallback ? " (fallback)" : ""}</dd></div>
+                  <div><dt>Updated</dt><dd>${escapeHtml(job.updated_at || "Not reported")}</dd></div>
                   <div><dt>Request ID</dt><dd>${escapeHtml(job.observability?.request_id || "Not reported")}</dd></div>
+                  <div><dt>MLflow</dt><dd>${escapeHtml(job.observability?.mlflow_run_id || "Not reported")}</dd></div>
                 </dl>
               </div>`
-            : `<div class="empty-state"><p>Upload a short video or open the demo review state. This is the first thing to test on the public link.</p></div>`
+            : `<div class="empty-state"><p>Upload a short Chinese or English video to inspect backend progress, Vietnamese previews, media players, and download links here.</p></div>`
       }
     </section>
   `;
@@ -862,23 +987,21 @@ function downloadButton(label: string, href: string) {
 function pipelineStepsMarkup(currentStage?: string) {
   const current = (currentStage || "").toLowerCase();
   const stages = [
-    ["Upload", "source file"],
-    ["Extract", "audio track"],
-    ["Transcribe", "source speech"],
-    ["Translate", "Vietnamese script"],
-    ["Subtitle", "timed SRT"],
-    ["Dub", "Vietnamese voice"],
-    ["Render", "final MP4"]
-  ];
-  const activeIndex = Math.max(
-    0,
-    stages.findIndex(([stage]) => current.includes(stage.toLowerCase()))
-  );
+    ["Upload", "source file", ["upload", "uploaded", "queued"]],
+    ["Extract", "audio track", ["extract", "audio"]],
+    ["Transcribe", "source speech", ["transcribe", "transcription", "speech"]],
+    ["Translate", "Vietnamese script", ["translate", "translation"]],
+    ["Subtitle", "timed SRT", ["subtitle", "srt", "vtt"]],
+    ["Dub", "Vietnamese voice", ["dub", "voice", "synth", "tts"]],
+    ["Render", "final MP4", ["render", "mux", "mp4", "complete", "succeeded"]]
+  ] as const;
+  const foundIndex = stages.findIndex(([, , keywords]) => keywords.some((keyword) => current.includes(keyword)));
+  const activeIndex = Math.max(0, foundIndex);
 
   return stages
     .map(([label, detail], index) => {
       const isActive = index === activeIndex;
-      const isDone = current.length > 0 && index < activeIndex;
+      const isDone = foundIndex >= 0 && index < activeIndex;
       return `<div class="plan-step ${isActive ? "is-active" : ""} ${isDone ? "is-done" : ""}"><span>${index + 1}</span><strong>${label}</strong><small>${detail}</small></div>`;
     })
     .join("");
@@ -891,7 +1014,7 @@ function historyItem(item: HistoryItem) {
 
 function videoHistoryItem(item: VideoHistoryItem) {
   const created = new Date(item.createdAt).toLocaleString();
-  const href = item.videoUrl || item.audioUrl || item.srtUrl;
+  const href = item.videoUrl || item.audioUrl || item.srtUrl || item.transcriptUrl;
   return `<li><div><strong>${escapeHtml(item.jobId)}</strong><p>${escapeHtml(item.fileName)} with ${escapeHtml(item.targetVoice)}</p><span>${escapeHtml(item.status)} · ${escapeHtml(item.sourceLanguage)} to vi · ${escapeHtml(created)}</span></div>${href ? `<a href="${escapeAttribute(href)}" download>Download</a>` : ""}</li>`;
 }
 
@@ -930,17 +1053,13 @@ function authPanelMarkup() {
 
 function bindEvents() {
   document.querySelector<HTMLButtonElement>("#workflow-tts")?.addEventListener("click", () => {
-    state.activeWorkflow = "tts";
-    render();
+    switchWorkflow("tts");
   });
   document.querySelector<HTMLButtonElement>("#workflow-video")?.addEventListener("click", () => {
-    state.activeWorkflow = "video";
-    render();
+    switchWorkflow("video", { focusUpload: true });
   });
   document.querySelector<HTMLButtonElement>("#hero-video-button")?.addEventListener("click", () => {
-    state.activeWorkflow = "video";
-    document.querySelector("#studio")?.scrollIntoView({ behavior: "smooth" });
-    render();
+    switchWorkflow("video", { scroll: true, focusUpload: true });
   });
   document.querySelector<HTMLButtonElement>("#login-button")?.addEventListener("click", () => {
     state.authMode = "login";
@@ -985,21 +1104,6 @@ function bindEvents() {
     event.preventDefault();
     void startVideoLocalization();
   });
-  document.querySelector<HTMLButtonElement>("#load-demo-review")?.addEventListener("click", () => {
-    state.videoJob = {
-      job_id: "demo_video_preview",
-      status: "needs_review",
-      progress: 72,
-      stage: "Demo review state: Vietnamese script and subtitles ready",
-      source_language: state.videoSourceLanguage,
-      target_language: "vi",
-      script: { vietnamese_text: demoScript, srt: demoSrt, editable: false }
-    };
-    state.videoScript = demoScript;
-    state.videoSrt = demoSrt;
-    render();
-  });
-
   document.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((input) => {
     input.addEventListener("change", () => {
       state.mode = input.value === "ssml" ? "ssml" : "text";
@@ -1030,7 +1134,10 @@ function bindEvents() {
   });
 
   document.querySelector<HTMLInputElement>("#video-file")?.addEventListener("change", (event) => {
-    state.videoFile = (event.target as HTMLInputElement).files?.[0] || null;
+    const file = (event.target as HTMLInputElement).files?.[0] || null;
+    const validationError = validateVideoFile(file);
+    state.videoFile = validationError ? null : file;
+    state.videoError = file ? validationError : "";
     render();
   });
   document.querySelector<HTMLSelectElement>("#video-source-language")?.addEventListener("change", (event) => {

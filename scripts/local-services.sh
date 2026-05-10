@@ -52,6 +52,9 @@ BACKEND_ENV_NAMES=(
   OPENAI_TTS_MODEL
   OPENAI_TTS_VOICE
   OPENAI_TTS_RESPONSE_FORMAT
+  LOCALIZATION_PROVIDER
+  OPENAI_TRANSCRIPTION_MODEL
+  OPENAI_TRANSLATION_MODEL
   GCP_PROJECT_ID
   GOOGLE_APPLICATION_CREDENTIALS
   GOOGLE_CLOUD_REGION
@@ -186,7 +189,7 @@ start() {
   done
 
   tmux -L "${TMUX_SOCKET}" new-session -d -s voice-ai-backend -c "${ROOT_DIR}" "${backend_tmux_env[@]}" \
-    "${TASKSET_CMD} docker run --rm --name voice-ai-backend --network ${NETWORK} -p 0.0.0.0:${API_PORT}:8080 -e ENVIRONMENT=local -e PORT=8080 -e TTS_PROVIDER -e API_KEYS -e OPENAI_API_KEY -e OPENAI_TTS_MODEL -e OPENAI_TTS_VOICE -e OPENAI_TTS_RESPONSE_FORMAT -e GCP_PROJECT_ID -e GOOGLE_APPLICATION_CREDENTIALS -e GOOGLE_CLOUD_REGION -e PUBLIC_DEMO_PROFILE -e REQUIRE_REAL_TTS -e CORS_ALLOW_ORIGINS=http://localhost:${FRONTEND_PORT},http://${SERVER_IP}:${FRONTEND_PORT} -e AUDIO_STORAGE_DIR=/app/data/audio -e AUDIO_BASE_URL=http://${SERVER_IP}:${API_PORT}/audio -e MLFLOW_TRACKING_URI=http://voice-ai-mlflow:5000 -e MLFLOW_EXPERIMENT_NAME=voice-ai-tts-synthesis -e MLFLOW_VIDEO_EXPERIMENT_NAME=voice-ai-video-localization -e LOCALIZATION_PROVIDER=local -e VIDEO_JOBS_DIR=/app/data/video-jobs -e FFMPEG_PATH=ffmpeg -v ${ROOT_DIR}/data/audio:/app/data/audio -v ${ROOT_DIR}/data/video-jobs:/app/data/video-jobs -v ${ROOT_DIR}/data/artifacts:/app/data/artifacts -v ${ROOT_DIR}/artifacts/mlflow:/mlflow/artifacts ${IMAGE} 2>&1 | tee -a logs/backend.log"
+    "${TASKSET_CMD} docker run --rm --name voice-ai-backend --network ${NETWORK} -p 0.0.0.0:${API_PORT}:8080 -e ENVIRONMENT=local -e PORT=8080 -e TTS_PROVIDER -e API_KEYS -e OPENAI_API_KEY -e OPENAI_TTS_MODEL -e OPENAI_TTS_VOICE -e OPENAI_TTS_RESPONSE_FORMAT -e LOCALIZATION_PROVIDER -e OPENAI_TRANSCRIPTION_MODEL -e OPENAI_TRANSLATION_MODEL -e GCP_PROJECT_ID -e GOOGLE_APPLICATION_CREDENTIALS -e GOOGLE_CLOUD_REGION -e PUBLIC_DEMO_PROFILE -e REQUIRE_REAL_TTS -e CORS_ALLOW_ORIGINS=http://localhost:${FRONTEND_PORT},http://${SERVER_IP}:${FRONTEND_PORT} -e AUDIO_STORAGE_DIR=/app/data/audio -e AUDIO_BASE_URL=http://${SERVER_IP}:${API_PORT}/audio -e MLFLOW_TRACKING_URI=http://voice-ai-mlflow:5000 -e MLFLOW_EXPERIMENT_NAME=voice-ai-tts-synthesis -e MLFLOW_VIDEO_EXPERIMENT_NAME=voice-ai-video-localization -e VIDEO_JOBS_DIR=/app/data/video-jobs -e FFMPEG_PATH=ffmpeg -v ${ROOT_DIR}/data/audio:/app/data/audio -v ${ROOT_DIR}/data/video-jobs:/app/data/video-jobs -v ${ROOT_DIR}/data/artifacts:/app/data/artifacts -v ${ROOT_DIR}/artifacts/mlflow:/mlflow/artifacts ${IMAGE} 2>&1 | tee -a logs/backend.log"
 
   if [[ "${FRONTEND_MODE}" == "preview" ]]; then
     tmux -L "${TMUX_SOCKET}" new-session -d -s voice-ai-frontend -c "${ROOT_DIR}/frontend" \
@@ -224,6 +227,9 @@ backend_runtime_status() {
   docker exec voice-ai-backend sh -c 'if [ -n "${OPENAI_TTS_MODEL:-}" ]; then echo "backend OPENAI_TTS_MODEL: set"; else echo "backend OPENAI_TTS_MODEL: unset"; fi' 2>/dev/null || true
   docker exec voice-ai-backend sh -c 'if [ -n "${OPENAI_TTS_VOICE:-}" ]; then echo "backend OPENAI_TTS_VOICE: set"; else echo "backend OPENAI_TTS_VOICE: unset"; fi' 2>/dev/null || true
   docker exec voice-ai-backend sh -c 'if [ -n "${OPENAI_TTS_RESPONSE_FORMAT:-}" ]; then echo "backend OPENAI_TTS_RESPONSE_FORMAT: set"; else echo "backend OPENAI_TTS_RESPONSE_FORMAT: unset"; fi' 2>/dev/null || true
+  docker exec voice-ai-backend sh -c 'if [ -n "${LOCALIZATION_PROVIDER:-}" ]; then echo "backend LOCALIZATION_PROVIDER: set"; else echo "backend LOCALIZATION_PROVIDER: unset"; fi' 2>/dev/null || true
+  docker exec voice-ai-backend sh -c 'if [ -n "${OPENAI_TRANSCRIPTION_MODEL:-}" ]; then echo "backend OPENAI_TRANSCRIPTION_MODEL: set"; else echo "backend OPENAI_TRANSCRIPTION_MODEL: unset"; fi' 2>/dev/null || true
+  docker exec voice-ai-backend sh -c 'if [ -n "${OPENAI_TRANSLATION_MODEL:-}" ]; then echo "backend OPENAI_TRANSLATION_MODEL: set"; else echo "backend OPENAI_TRANSLATION_MODEL: unset"; fi' 2>/dev/null || true
   docker exec voice-ai-backend sh -c 'if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then echo "backend GOOGLE_APPLICATION_CREDENTIALS: set"; else echo "backend GOOGLE_APPLICATION_CREDENTIALS: unset"; fi' 2>/dev/null || true
   docker exec voice-ai-backend sh -c 'if [ -n "${PUBLIC_DEMO_PROFILE:-}" ]; then echo "backend PUBLIC_DEMO_PROFILE: set"; else echo "backend PUBLIC_DEMO_PROFILE: unset"; fi' 2>/dev/null || true
   docker exec voice-ai-backend sh -c 'if [ "${REQUIRE_REAL_TTS:-0}" = "1" ]; then echo "backend REQUIRE_REAL_TTS: set"; else echo "backend REQUIRE_REAL_TTS: unset"; fi' 2>/dev/null || true

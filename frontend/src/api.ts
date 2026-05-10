@@ -86,32 +86,70 @@ export type VideoLocalizationRequest = {
   };
 };
 
+export type VideoLocalizationArtifact = {
+  type?: string;
+  name?: string;
+  format?: string;
+  download_url?: string;
+  url?: string;
+  path?: string;
+  filename?: string;
+  bytes?: number;
+  duration_ms?: number;
+  checksum_sha256?: string;
+};
+
+export type VideoLocalizationSegment = {
+  index?: number;
+  start_ms?: number;
+  end_ms?: number;
+  start?: string;
+  end?: string;
+  source_text?: string;
+  translated_text?: string;
+  vietnamese_text?: string;
+  text?: string;
+};
+
 export type VideoLocalizationJob = {
   job_id: string;
-  status: "queued" | "processing" | "needs_review" | "succeeded" | "failed" | string;
+  status: "queued" | "running" | "processing" | "needs_review" | "succeeded" | "failed" | "canceled" | string;
   progress?: number;
   stage?: string;
   message?: string;
+  input_filename?: string;
+  input_bytes?: number;
   source_language?: string;
   target_language?: string;
+  provider?: ProviderStatus;
+  segments?: VideoLocalizationSegment[];
   script?: {
     vietnamese_text?: string;
     srt?: string;
     editable?: boolean;
   };
-  artifacts?: {
-    transcript_url?: string;
-    transcript_path?: string;
-    srt_url?: string;
-    srt_path?: string;
-    audio_url?: string;
-    audio_path?: string;
-    video_url?: string;
-    video_path?: string;
-  };
+  artifacts?:
+    | {
+        transcript_url?: string;
+        transcript_path?: string;
+        srt_url?: string;
+        srt_path?: string;
+        vtt_url?: string;
+        vtt_path?: string;
+        audio_url?: string;
+        audio_path?: string;
+        video_url?: string;
+        video_path?: string;
+      }
+    | VideoLocalizationArtifact[]
+    | string[];
   observability?: {
     request_id?: string;
+    mlflow_run_id?: string | null;
+    warnings?: string[];
   };
+  warnings?: string[];
+  error?: { code?: string; message?: string } | string | null;
   created_at?: string;
   updated_at?: string;
 };

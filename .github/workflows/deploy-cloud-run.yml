@@ -19,6 +19,15 @@ on:
         description: "Cloud Run service name"
         required: true
         default: "voice-ai"
+      image_tag:
+        description: "Image tag to build and deploy"
+        required: true
+        default: "manual"
+      deploy_video_job:
+        description: "Create or update the Cloud Run video job command"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -26,10 +35,55 @@ permissions:
 
 env:
   IMAGE_NAME: voice-ai
+  VIDEO_JOB_NAME: voice-ai-video-localization
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backend tests
+        run: pytest -q
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend lint, test, build
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Validate Docker Compose config
+        run: docker compose config --quiet
+
+      - name: Build container locally
+        run: docker build -t "voice-ai:${{ github.sha }}" .
+
   deploy:
     runs-on: ubuntu-latest
+    needs: verify
     environment: ${{ inputs.environment }}
     steps:
       - name: Check out repository
@@ -56,7 +110,7 @@ jobs:
       - name: Build and push image
         shell: bash
         env:
-          IMAGE_URI: ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'voice-ai' }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          IMAGE_URI: ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'voice-ai' }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag == 'manual' && github.sha || inputs.image_tag }}
         run: |
           set -euo pipefail
           docker build -t "${IMAGE_URI}" .
@@ -74,7 +128,10 @@ jobs:
           env_vars: |-
             ENVIRONMENT=${{ inputs.environment }}
             SERVICE_VERSION=${{ github.sha }}
-            TTS_PROVIDER=google
+            TTS_PROVIDER=openai
+            OPENAI_TTS_MODEL=${{ vars.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts' }}
+            OPENAI_TTS_VOICE=${{ vars.OPENAI_TTS_VOICE || 'marin' }}
+            OPENAI_TTS_RESPONSE_FORMAT=${{ vars.OPENAI_TTS_RESPONSE_FORMAT || 'wav' }}
             GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}
             GOOGLE_CLOUD_REGION=${{ inputs.region }}
             AUDIO_STORAGE_MODE=gcs
@@ -104,6 +161,7 @@ jobs:
             FFMPEG_THREADS=2
           secrets: |-
             API_KEYS=${{ secrets.API_KEYS_SECRET_NAME }}:latest
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_SECRET_NAME }}:latest
           flags: >-
             --service-account=${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
             --memory=4Gi
@@ -112,6 +170,29 @@ jobs:
             --max-instances=10
             --concurrency=1
             --timeout=3600
+
+      - name: Create or update video Cloud Run job
+        if: ${{ inputs.deploy_video_job }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gcloud run jobs describe "${VIDEO_JOB_NAME}" --project="${{ vars.GCP_PROJECT_ID }}" --region="${{ inputs.region }}" >/dev/null 2>&1; then
+            job_command=(update)
+          else
+            job_command=(create)
+          fi
+          gcloud run jobs "${job_command[@]}" "${VIDEO_JOB_NAME}" \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --region="${{ inputs.region }}" \
+            --image="${IMAGE_URI}" \
+            --service-account="${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}" \
+            --memory=4Gi \
+            --cpu=2 \
+            --tasks=1 \
+            --parallelism=1 \
+            --task-timeout=3600 \
+            --set-env-vars="ENVIRONMENT=${{ inputs.environment }},SERVICE_VERSION=${{ github.sha }},TTS_PROVIDER=openai,OPENAI_TTS_MODEL=${{ vars.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts' }},OPENAI_TTS_VOICE=${{ vars.OPENAI_TTS_VOICE || 'marin' }},OPENAI_TTS_RESPONSE_FORMAT=${{ vars.OPENAI_TTS_RESPONSE_FORMAT || 'wav' }},GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_REGION=${{ inputs.region }},AUDIO_STORAGE_MODE=gcs,GCS_AUDIO_BUCKET=${{ vars.GCS_AUDIO_BUCKET }},GCS_AUDIO_PREFIX=voice-ai/audio,VIDEO_LOCALIZATION_ENABLED=true,VIDEO_STORAGE_MODE=gcs,GCS_ARTIFACT_BUCKET=${{ vars.GCS_ARTIFACT_BUCKET }},GCS_SOURCE_VIDEO_PREFIX=voice-ai/video/source,GCS_RENDERED_VIDEO_PREFIX=voice-ai/video/rendered,GCS_INTERMEDIATE_PREFIX=voice-ai/video/intermediate,JOB_DISPATCH_MODE=cloud_run_job,MLFLOW_TRACKING_URI=${{ vars.MLFLOW_TRACKING_URI }},MLFLOW_EXPERIMENT_NAME=voice-ai-tts-synthesis,MLFLOW_VIDEO_EXPERIMENT_NAME=voice-ai-video-localization,VIDEO_OBSERVABILITY_STAGES=upload,stt,translation,tts,alignment,render,delivery,LOG_LEVEL=INFO,STRUCTURED_LOGS=true,MAX_INPUT_CHARS=5000,MAX_UPLOAD_BYTES=524288000,REQUEST_TIMEOUT_SECONDS=3600,VIDEO_STAGE_TIMEOUT_SECONDS=3300,FFMPEG_THREADS=2" \
+            --set-secrets="API_KEYS=${{ secrets.API_KEYS_SECRET_NAME }}:latest,OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_SECRET_NAME }}:latest"
 
       - name: Print service URL
         run: echo "${{ steps.deploy.outputs.url }}"

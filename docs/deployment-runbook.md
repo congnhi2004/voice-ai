@@ -68,6 +68,56 @@ Recommended production deployment should be CI/CD-driven:
 
 Cloud Run is a managed platform for running code or containers on Google infrastructure. It provides HTTPS service endpoints and handles infrastructure/scaling operations. Cloud Run instances are disposable, so generated audio must use durable storage in production.
 
+Concrete artifacts for this repo:
+
+- `.github/workflows/ci.yml`: backend tests, frontend lint/test/build, compose config, Docker build, and video smoke hooks.
+- `.github/workflows/deploy-cloud-run.yml`: manual Cloud Run deploy through GitHub OIDC, Artifact Registry, Secret Manager mappings, and Cloud Run job update.
+- `deploy/cloud-run-deploy-operator.sh`: dry-run-first operator deploy script.
+- `deploy/cloud-run-service.yaml.template` and `deploy/cloud-run-video-job.yaml.template`: service/job review templates.
+- `deploy/gcs-audio-lifecycle.json` and `deploy/gcs-video-artifact-lifecycle.json`: lifecycle retention templates.
+- `deploy/secret-manager-map.md`: required GitHub secrets, GitHub variables, Secret Manager secrets, and IAM.
+- `deploy/release-smoke-checklist.md`: release smoke, storage, job, logs, and rollback commands.
+
+Production Cloud Run must use Secret Manager for `OPENAI_API_KEY` and `API_KEYS`; do not put secret values in GitHub variables, workflow YAML, plain env vars, or committed files. Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Cloud Run services or jobs; use the Cloud Run runtime service account.
+
+Minimum manual dry run:
+
+```bash
+export GCP_PROJECT_ID=my-project
+export REGION=us-central1
+export ENVIRONMENT=staging
+export SERVICE_NAME=voice-ai
+export CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=voice-ai-run@my-project.iam.gserviceaccount.com
+export GCS_AUDIO_BUCKET=my-voice-ai-audio
+export GCS_ARTIFACT_BUCKET=my-voice-ai-artifacts
+export API_KEYS_SECRET_NAME=voice-ai-api-keys
+export OPENAI_API_KEY_SECRET_NAME=voice-ai-openai-api-key
+export MLFLOW_TRACKING_URI=https://mlflow.example.com
+deploy/cloud-run-deploy-operator.sh
+```
+
+Execute only after credentials and IAM are configured:
+
+```bash
+DRY_RUN=0 deploy/cloud-run-deploy-operator.sh
+```
+
+Apply bucket lifecycle policies:
+
+```bash
+gcloud storage buckets update "gs://${GCS_AUDIO_BUCKET}" \
+  --lifecycle-file=deploy/gcs-audio-lifecycle.json
+gcloud storage buckets update "gs://${GCS_ARTIFACT_BUCKET}" \
+  --lifecycle-file=deploy/gcs-video-artifact-lifecycle.json
+```
+
+Signed URL policy:
+
+- Buckets remain private.
+- App/API authorizes the user first, then returns a time-limited signed URL for a specific object.
+- Default TTL is `SIGNED_URL_TTL_SECONDS=3600`.
+- Full signed URLs should not be written to application logs or MLflow parameters.
+
 ## Staging Verification
 
 - `/healthz` returns `200`.
@@ -90,4 +140,3 @@ Cloud Run is a managed platform for running code or containers on Google infrast
 - Provider quota exceeded: rate-limit clients and alert on quota errors.
 - Disposable filesystem: local file paths are acceptable only outside production.
 - MLflow outage: synthesis may continue, but alert and record logging failures.
-
