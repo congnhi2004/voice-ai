@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+date: Sun, 10 May 2026 14:29:20 GMT
+server: uvicorn
+content-type: text/html; charset=utf-8
+content-length: 2
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+

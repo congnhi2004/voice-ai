@@ -1,0 +1,1 @@
+{"audio_format": 1, "bits_per_sample": 16, "block_align": 2, "byte_rate": 48000, "bytes": 331244, "channels": 1, "data_chunk_actual_bytes": 331200, "data_chunk_declared_size": 4294967295, "duration_seconds_from_actual_bytes": 6.9, "riff": "RIFF", "sample_rate": 24000, "wave": "WAVE"}

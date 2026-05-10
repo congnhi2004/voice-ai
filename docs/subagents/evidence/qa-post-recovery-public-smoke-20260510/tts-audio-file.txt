@@ -1,0 +1,1 @@
+docs/subagents/evidence/qa-post-recovery-public-smoke-20260510/tts-audio.wav: RIFF (little-endian) data, WAVE audio, Microsoft PCM, 16 bit, mono 24000 Hz

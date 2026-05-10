@@ -1,0 +1,28 @@
+## git
+## main...origin/main
+?? docs/subagents/evidence/qa-post-recovery-public-smoke-20260510/
+f2ba690ea43d4c7b5899e04aea757c266ce4d9be
+## listeners
+LISTEN 0      2048         0.0.0.0:8080       0.0.0.0:*    users:(("uvicorn",pid=26096,fd=13))      
+LISTEN 0      511          0.0.0.0:4174       0.0.0.0:*    users:(("node",pid=12534,fd=23))         
+LISTEN 0      4096         0.0.0.0:5000       0.0.0.0:*                                             
+## process scan
+  27590   11876 Ssl        06:45 docker run --rm python:3.10-slim-bookworm bash -lc apt-get -o Acquire::Retries=5 update && apt-get install -y --no-install-recommends build-essential curl ffmpeg fontconfig fonts-dejavu-core git nodejs npm && rm -rf /var/lib/apt/lists/*
+  27712   27688 Ss         06:34 bash -lc apt-get -o Acquire::Retries=5 update && apt-get install -y --no-install-recommends build-essential curl ffmpeg fontconfig fonts-dejavu-core git nodejs npm && rm -rf /var/lib/apt/lists/*
+  27768   27712 S          06:34 apt-get -o Acquire::Retries=5 update
+  30539   30524 Sl+        01:06 docker build --file /root/.ssh/npm/AutoClipperAI/Dockerfile.dev --tag autoclipperai_autoclip-dev --iidfile /tmp/tmpf88krvce /root/.ssh/npm/AutoClipperAI
+  30679   30632 Ss         01:06 /bin/sh -c set -eux;     sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources;     printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-retries;     for attempt in 1 2 3 4 5; do         apt-get update && break;         rm -rf /var/lib/apt/lists/*;         sleep 5;     done;     apt-get install -y --no-install-recommends         build-essential         curl         ffmpeg         fontconfig         fonts-dejavu-core         git         nodejs         npm     && rm -rf /var/lib/apt/lists/*
+  30718   30679 S          01:06 apt-get update
+## docker ps
+NAMES               IMAGE                           STATUS          PORTS
+objective_lalande   python:3.10-slim-bookworm       Up 6 minutes    
+voice-ai-mlflow     ghcr.io/mlflow/mlflow:v3.12.0   Up 29 minutes   0.0.0.0:5000->5000/tcp
+## docker system df
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          4         2         1.991GB   483.3MB (24%)
+Containers      2         2         1.511MB   0B (0%)
+Local Volumes   2         0         0B        0B
+Build Cache     9         9         54.77MB   0B
+## disk
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   48G   30G   16G  66% /

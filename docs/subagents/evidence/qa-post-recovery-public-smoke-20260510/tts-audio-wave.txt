@@ -1,0 +1,1 @@
+{"bytes": 331244, "channels": 1, "duration_seconds": 89478.485, "framerate": 24000, "frames": 2147483647, "sample_width": 2}
