@@ -7,11 +7,17 @@ Thư mục này lưu báo cáo làm việc của các subagent và bằng chứn
 - [Backend Builder Report](backend-report.md)
 - [Backend Local Speech Fallback - 2026-05-10](backend-local-speech-fallback-report-20260510.md)
 - [Backend OpenAI Voice Quality - 2026-05-10](backend-openai-voice-quality-report-20260510.md)
+- [Backend Real Video Localization - 2026-05-10](backend-real-video-localization-report-20260510.md)
 - [Frontend Builder Report](frontend-report.md)
 - [Frontend Redesign Report - 2026-05-10](frontend-redesign-report-20260510.md)
+- [Frontend Video Acceptance - 2026-05-10](frontend-video-acceptance-report-20260510.md)
+- [Frontend Video Tab Fix - 2026-05-10](frontend-video-tab-fix-report-20260510.md)
+- [Frontend Video E2E Fix - 2026-05-10](frontend-video-e2e-fix-report-20260510.md)
 - [Infra/Observability Report](infra-report.md)
 - [Infra Local Speech Runtime - 2026-05-10](infra-local-speech-runtime-report-20260510.md)
 - [Infra Production Secret Guard - 2026-05-10](infra-production-secret-guard-report-20260510.md)
+- [Infra Video Environment Runtime - 2026-05-10](infra-video-env-runtime-report-20260510.md)
+- [Cloud Production Lifecycle - 2026-05-10](cloud-production-lifecycle-report-20260510.md)
 - [Product Architecture Report](product-architecture-report.md)
 - [QA Acceptance Report](qa-report.md)
 - [QA Public Runtime Acceptance - 2026-05-10](qa-public-runtime-20260510.md)
@@ -24,6 +30,7 @@ Thư mục này lưu báo cáo làm việc của các subagent và bằng chứn
 ## Bằng chứng runtime
 
 - [evidence/images](evidence/images/) - ảnh chụp Playwright, mobile/desktop, review cuộn trang; bằng chứng PM mới dùng prefix `pm-`, ví dụ `pm-redesign-*`, `pm-scroll-*`, `pm-openai-*`.
+- Bằng chứng video mới nhất: [frontend-video-e2e-real-submit-fixed-20260510.png](evidence/images/frontend-video-e2e-real-submit-fixed-20260510.png), [pm-premium-public-video-tab-20260510.png](evidence/images/pm-premium-public-video-tab-20260510.png), các ảnh `frontend-premium-*-video-*`, và video/subtitle `final-gate-video-*` trong `evidence/video/`.
 - [evidence/audio](evidence/audio/) - file WAV từ TTS và video localization.
 - [evidence/video](evidence/video/) - MP4 nguồn/kết quả và phụ đề SRT/VTT.
 - [evidence/api](evidence/api/) - response TXT/JSON, browser-check JSON, bundle JS dùng làm bằng chứng.
