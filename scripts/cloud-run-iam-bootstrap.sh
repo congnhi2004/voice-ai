@@ -10,12 +10,30 @@ set -euo pipefail
 : "${GCS_AUDIO_BUCKET:?Set GCS_AUDIO_BUCKET}"
 : "${GCS_ARTIFACT_BUCKET:?Set GCS_ARTIFACT_BUCKET}"
 : "${CLOUD_TASKS_QUEUE:=voice-ai-video}"
+: "${API_KEYS_SECRET_NAME:=voice-ai-api-keys}"
+: "${OPENAI_API_KEY_SECRET_NAME:=voice-ai-openai-api-key}"
+: "${DRY_RUN:=1}"
+: "${GRANT_RUNTIME_SIGNBLOB:=1}"
 
-PROJECT_NUMBER="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')"
+run_cmd() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+  if [[ "${DRY_RUN}" == "0" ]]; then
+    "$@"
+  fi
+}
 
-gcloud config set project "${GCP_PROJECT_ID}" >/dev/null
+if [[ "${DRY_RUN}" == "0" ]]; then
+  PROJECT_NUMBER="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')"
+else
+  PROJECT_NUMBER="${PROJECT_NUMBER:-000000000000}"
+  echo "# Dry run uses PROJECT_NUMBER=${PROJECT_NUMBER}; set PROJECT_NUMBER to render exact Cloud Tasks service-agent bindings."
+fi
 
-gcloud services enable \
+run_cmd gcloud config set project "${GCP_PROJECT_ID}"
+
+run_cmd gcloud services enable \
   run.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
@@ -29,42 +47,115 @@ gcloud services enable \
   monitoring.googleapis.com
 
 for sa in "${DEPLOY_SERVICE_ACCOUNT}" "${RUNTIME_SERVICE_ACCOUNT}" "${TASKS_SERVICE_ACCOUNT}"; do
-  if ! gcloud iam service-accounts describe "${sa}" >/dev/null 2>&1; then
+  if [[ "${DRY_RUN}" == "0" ]] && ! gcloud iam service-accounts describe "${sa}" >/dev/null 2>&1; then
     name="${sa%@*}"
-    gcloud iam service-accounts create "${name}" --display-name="${name}"
+    run_cmd gcloud iam service-accounts create "${name}" --display-name="${name}"
+  elif [[ "${DRY_RUN}" != "0" ]]; then
+    run_cmd gcloud iam service-accounts describe "${sa}"
+    run_cmd gcloud iam service-accounts create "${sa%@*}" --display-name="${sa%@*}"
   fi
 done
 
-if ! gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" --location "${REGION}" >/dev/null 2>&1; then
-  gcloud artifacts repositories create "${ARTIFACT_REPOSITORY}" \
+if [[ "${DRY_RUN}" == "0" ]] && ! gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" --location "${REGION}" >/dev/null 2>&1; then
+  run_cmd gcloud artifacts repositories create "${ARTIFACT_REPOSITORY}" \
     --repository-format=docker \
     --location="${REGION}" \
     --description="Voice AI containers"
+elif [[ "${DRY_RUN}" != "0" ]]; then
+  run_cmd gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" --location "${REGION}"
+  run_cmd gcloud artifacts repositories create "${ARTIFACT_REPOSITORY}" \
+    --repository-format=docker \
+    --location="${REGION}" \
+    --description="Voice AI containers"
+else
+  run_cmd gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" --location "${REGION}"
 fi
 
-gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" \
+for bucket in "${GCS_AUDIO_BUCKET}" "${GCS_ARTIFACT_BUCKET}"; do
+  if [[ "${DRY_RUN}" == "0" ]] && ! gcloud storage buckets describe "gs://${bucket}" >/dev/null 2>&1; then
+    run_cmd gcloud storage buckets create "gs://${bucket}" \
+      --project="${GCP_PROJECT_ID}" \
+      --location="${REGION}" \
+      --uniform-bucket-level-access
+  elif [[ "${DRY_RUN}" != "0" ]]; then
+    run_cmd gcloud storage buckets describe "gs://${bucket}" --project="${GCP_PROJECT_ID}"
+    run_cmd gcloud storage buckets create "gs://${bucket}" \
+      --project="${GCP_PROJECT_ID}" \
+      --location="${REGION}" \
+      --uniform-bucket-level-access
+  fi
+  run_cmd gcloud storage buckets update "gs://${bucket}" \
+    --project="${GCP_PROJECT_ID}" \
+    --public-access-prevention=enforced
+done
+
+run_cmd gcloud storage buckets update "gs://${GCS_AUDIO_BUCKET}" \
+  --project="${GCP_PROJECT_ID}" \
+  --lifecycle-file=deploy/gcs-audio-lifecycle.json
+run_cmd gcloud storage buckets update "gs://${GCS_ARTIFACT_BUCKET}" \
+  --project="${GCP_PROJECT_ID}" \
+  --lifecycle-file=deploy/gcs-video-artifact-lifecycle.json
+
+for secret in "${API_KEYS_SECRET_NAME}" "${OPENAI_API_KEY_SECRET_NAME}"; do
+  if [[ "${DRY_RUN}" == "0" ]] && ! gcloud secrets describe "${secret}" --project="${GCP_PROJECT_ID}" >/dev/null 2>&1; then
+    run_cmd gcloud secrets create "${secret}" \
+      --project="${GCP_PROJECT_ID}" \
+      --replication-policy="automatic"
+    echo "# Add the first version separately without echoing the value: printf %s \"...\" | gcloud secrets versions add ${secret} --data-file=-"
+  elif [[ "${DRY_RUN}" != "0" ]]; then
+    run_cmd gcloud secrets describe "${secret}" --project="${GCP_PROJECT_ID}"
+    run_cmd gcloud secrets create "${secret}" \
+      --project="${GCP_PROJECT_ID}" \
+      --replication-policy="automatic"
+    echo "# Secret value command intentionally omitted from dry-run output."
+  fi
+done
+
+run_cmd gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" \
   --member="serviceAccount:${DEPLOY_SERVICE_ACCOUNT}" \
   --role="roles/run.admin"
-gcloud artifacts repositories add-iam-policy-binding "${ARTIFACT_REPOSITORY}" \
+run_cmd gcloud artifacts repositories add-iam-policy-binding "${ARTIFACT_REPOSITORY}" \
   --location="${REGION}" \
   --member="serviceAccount:${DEPLOY_SERVICE_ACCOUNT}" \
   --role="roles/artifactregistry.writer"
-gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SERVICE_ACCOUNT}" \
+run_cmd gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SERVICE_ACCOUNT}" \
   --member="serviceAccount:${DEPLOY_SERVICE_ACCOUNT}" \
   --role="roles/iam.serviceAccountUser"
 
-gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" \
+run_cmd gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/cloudtexttospeech.user"
-gcloud storage buckets add-iam-policy-binding "gs://${GCS_AUDIO_BUCKET}" \
+run_cmd gcloud storage buckets add-iam-policy-binding "gs://${GCS_AUDIO_BUCKET}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/storage.objectAdmin"
-gcloud storage buckets add-iam-policy-binding "gs://${GCS_ARTIFACT_BUCKET}" \
+run_cmd gcloud storage buckets add-iam-policy-binding "gs://${GCS_ARTIFACT_BUCKET}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/storage.objectAdmin"
 
-if ! gcloud tasks queues describe "${CLOUD_TASKS_QUEUE}" --location="${REGION}" >/dev/null 2>&1; then
-  gcloud tasks queues create "${CLOUD_TASKS_QUEUE}" \
+for secret in "${API_KEYS_SECRET_NAME}" "${OPENAI_API_KEY_SECRET_NAME}"; do
+  run_cmd gcloud secrets add-iam-policy-binding "${secret}" \
+    --project="${GCP_PROJECT_ID}" \
+    --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+    --role="roles/secretmanager.secretAccessor"
+done
+
+if [[ "${GRANT_RUNTIME_SIGNBLOB}" == "1" ]]; then
+  run_cmd gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SERVICE_ACCOUNT}" \
+    --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+    --role="roles/iam.serviceAccountTokenCreator"
+fi
+
+if [[ "${DRY_RUN}" == "0" ]] && ! gcloud tasks queues describe "${CLOUD_TASKS_QUEUE}" --location="${REGION}" >/dev/null 2>&1; then
+  run_cmd gcloud tasks queues create "${CLOUD_TASKS_QUEUE}" \
+    --location="${REGION}" \
+    --max-dispatches-per-second=2 \
+    --max-concurrent-dispatches=1 \
+    --max-attempts=3 \
+    --min-backoff=30s \
+    --max-backoff=600s
+else
+  run_cmd gcloud tasks queues describe "${CLOUD_TASKS_QUEUE}" --location="${REGION}"
+  run_cmd gcloud tasks queues update "${CLOUD_TASKS_QUEUE}" \
     --location="${REGION}" \
     --max-dispatches-per-second=2 \
     --max-concurrent-dispatches=1 \
@@ -73,10 +164,10 @@ if ! gcloud tasks queues describe "${CLOUD_TASKS_QUEUE}" --location="${REGION}" 
     --max-backoff=600s
 fi
 
-gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" \
+run_cmd gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/cloudtasks.enqueuer"
-gcloud iam service-accounts add-iam-policy-binding "${TASKS_SERVICE_ACCOUNT}" \
+run_cmd gcloud iam service-accounts add-iam-policy-binding "${TASKS_SERVICE_ACCOUNT}" \
   --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudtasks.iam.gserviceaccount.com" \
   --role="roles/iam.serviceAccountUser"
 
@@ -97,4 +188,5 @@ Configure GitHub Workload Identity Federation separately, then set repository va
 - secrets.GCP_WORKLOAD_IDENTITY_PROVIDER=<provider-resource-name>
 - secrets.GCP_DEPLOY_SERVICE_ACCOUNT=${DEPLOY_SERVICE_ACCOUNT}
 - secrets.API_KEYS_SECRET_NAME=<secret-manager-secret-name>
+- secrets.OPENAI_API_KEY_SECRET_NAME=<secret-manager-secret-name>
 EOF

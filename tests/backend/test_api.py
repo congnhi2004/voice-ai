@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 from app.config import OPENAI_AUDIO_UPLOAD_LIMIT_BYTES, OPENAI_TTS_INPUT_MAX_CHARS, Settings
 from app.main import create_app
 from app.providers import LocalFallbackProvider, OpenAITTSProvider, build_provider
-from app.video_localization import OpenAIVideoLocalizationProvider
+from app.storage import GCSStorage
+from app.video_localization import DispatchResult, OpenAIVideoLocalizationProvider, VideoDispatchError
 
 
 def make_client(tmp_path: Path, **overrides) -> TestClient:
@@ -146,6 +147,12 @@ class FakeGCSBlob:
         method = kwargs.get("method", "GET")
         ttl = int(kwargs["expiration"].total_seconds())
         return f"https://signed.example/{self.bucket_name}/{self.name}?method={method}&ttl={ttl}&X-Goog-Signature=fake"
+
+    def download_as_bytes(self):
+        return self.uploads[f"gs://{self.bucket_name}/{self.name}"]["data"]
+
+    def download_to_filename(self, filename: str):
+        Path(filename).write_bytes(self.download_as_bytes())
 
 
 class FakeGCSBucket:
@@ -683,6 +690,194 @@ def test_gcs_video_artifacts_upload_and_refresh_signed_urls(
     redirect = client.get(f"/v1/video-localization/jobs/{body['job_id']}/artifacts/{filename}", follow_redirects=False)
     assert redirect.status_code == 307
     assert redirect.headers["location"].startswith("https://signed.example/voice-ai-artifact-test/")
+
+
+def test_video_cloud_tasks_mode_creates_queued_job_and_status_polling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    dispatched: list[str] = []
+
+    monkeypatch.setattr("app.video_localization.CloudTasksVideoDispatcher.readiness", lambda self: (True, None))
+
+    def fake_dispatch(self, job_id: str):
+        dispatched.append(job_id)
+        return DispatchResult(mode="cloud_tasks", task_name=f"task/{job_id}", detail="queued")
+
+    monkeypatch.setattr("app.video_localization.CloudTasksVideoDispatcher.dispatch", fake_dispatch)
+    client = make_client(
+        tmp_path,
+        video_job_dispatch_mode="cloud_tasks",
+        cloud_tasks_project_id="voice-ai-test",
+        cloud_tasks_queue="video-localization",
+        cloud_tasks_handler_url="https://voice-ai.example/internal/video-localization/tasks",
+        cloud_tasks_service_account_email="tasks@voice-ai-test.iam.gserviceaccount.com",
+        internal_task_token="test-token",
+    )
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["dispatch"]["mode"] == "cloud_tasks"
+    assert body["dispatch"]["task_name"] == f"task/{body['job_id']}"
+    assert body["artifacts"] == []
+    assert dispatched == [body["job_id"]]
+
+    status_response = client.get(f"/v1/video-localization/jobs/{body['job_id']}")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "queued"
+
+
+def test_internal_video_task_handler_processes_job_idempotently(
+    tmp_path: Path,
+    fake_espeak_ng: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("app.video_localization.CloudTasksVideoDispatcher.readiness", lambda self: (True, None))
+    monkeypatch.setattr(
+        "app.video_localization.CloudTasksVideoDispatcher.dispatch",
+        lambda self, job_id: DispatchResult(mode="cloud_tasks", task_name=f"task/{job_id}", detail="queued"),
+    )
+    monkeypatch.setattr("app.video_localization.validate_mp4_container", lambda path, settings: None)
+    render_calls: list[str] = []
+
+    def fake_render(settings, source, audio, subtitles, output):
+        render_calls.append(str(output))
+        output.write_bytes(b"\x00\x00\x00 fake localized mp4")
+        return None
+
+    monkeypatch.setattr("app.video_localization.render_or_copy_video", fake_render)
+    client = make_client(
+        tmp_path,
+        video_job_dispatch_mode="cloud_tasks",
+        cloud_tasks_project_id="voice-ai-test",
+        cloud_tasks_queue="video-localization",
+        cloud_tasks_handler_url="https://voice-ai.example/internal/video-localization/tasks",
+        cloud_tasks_service_account_email="tasks@voice-ai-test.iam.gserviceaccount.com",
+        internal_task_token="test-token",
+    )
+    queued = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+    ).json()
+
+    unauthorized = client.post(f"/internal/video-localization/tasks/{queued['job_id']}")
+    assert unauthorized.status_code == 403
+    assert unauthorized.json()["error"]["code"] == "invalid_internal_task_token"
+
+    first = client.post(f"/internal/video-localization/tasks/{queued['job_id']}", headers={"X-Internal-Task-Token": "test-token"})
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["status"] == "succeeded"
+    assert len(render_calls) == 1
+
+    second = client.post(f"/internal/video-localization/tasks/{queued['job_id']}", headers={"X-Internal-Task-Token": "test-token"})
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["status"] == "succeeded"
+    assert len(second_body["artifacts"]) == len(first_body["artifacts"])
+    assert len(render_calls) == 1
+
+
+def test_readyz_reports_video_storage_and_dispatch_modes(tmp_path: Path, fake_espeak_ng: list[list[str]], monkeypatch: pytest.MonkeyPatch):
+    uploads: dict[str, dict] = {}
+
+    def fake_bucket(self):
+        return FakeGCSBucket(self.bucket_name, uploads)
+
+    monkeypatch.setattr("app.storage.GCSStorage._get_bucket", fake_bucket)
+    monkeypatch.setattr("app.video_localization.CloudTasksVideoDispatcher.readiness", lambda self: (True, None))
+    client = make_client(
+        tmp_path,
+        storage_provider="gcs",
+        gcs_audio_bucket="voice-ai-audio-test",
+        gcs_artifact_bucket="voice-ai-artifact-test",
+        video_job_dispatch_mode="cloud_tasks",
+        cloud_tasks_project_id="voice-ai-test",
+        cloud_tasks_queue="video-localization",
+        cloud_tasks_handler_url="https://voice-ai.example/internal/video-localization/tasks",
+        cloud_tasks_service_account_email="tasks@voice-ai-test.iam.gserviceaccount.com",
+    )
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["storage"]["mode"] == "gcs"
+    assert body["video_localization"]["storage"] == {
+        "mode": "gcs",
+        "job_metadata_mode": "gcs",
+        "artifact_bucket": "voice-ai-artifact-test",
+    }
+    assert body["video_localization"]["dispatch"]["mode"] == "cloud_tasks"
+    assert body["video_localization"]["dispatch"]["ready"] is True
+
+
+def test_gcs_storage_downloads_uploaded_bytes_by_uri(tmp_path: Path):
+    uploads: dict[str, dict] = {}
+    settings = Settings(gcs_artifact_bucket="voice-ai-artifact-test", signed_url_ttl_seconds=60)
+    storage = GCSStorage(settings, "voice-ai-artifact-test", client=type("Client", (), {"bucket": lambda self, name: FakeGCSBucket(name, uploads)})())
+
+    stored = storage.upload_bytes("voice-ai/video/jobs/job-1/status.json", b'{"status":"queued"}', "application/json")
+
+    assert stored.storage_uri == "gs://voice-ai-artifact-test/voice-ai/video/jobs/job-1/status.json"
+    assert storage.download_bytes(stored.storage_uri) == b'{"status":"queued"}'
+
+
+def test_video_dispatch_failure_maps_to_failed_job_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.video_localization.CloudTasksVideoDispatcher.readiness", lambda self: (True, None))
+    monkeypatch.setattr(
+        "app.video_localization.CloudTasksVideoDispatcher.dispatch",
+        lambda self, job_id: (_ for _ in ()).throw(VideoDispatchError("queue unavailable")),
+    )
+    client = make_client(
+        tmp_path,
+        video_job_dispatch_mode="cloud_tasks",
+        cloud_tasks_project_id="voice-ai-test",
+        cloud_tasks_queue="video-localization",
+        cloud_tasks_handler_url="https://voice-ai.example/internal/video-localization/tasks",
+        cloud_tasks_service_account_email="tasks@voice-ai-test.iam.gserviceaccount.com",
+    )
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+    )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["error"]["code"] == "video_dispatch_failed"
+    status_response = client.get(f"/v1/video-localization/jobs/{body['job_id']}")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "failed"
+
+
+def test_video_storage_failure_maps_to_contract_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def failing_upload(self, local_path, object_name, content_type=None):
+        raise RuntimeError("gcs write failed")
+
+    monkeypatch.setattr("app.storage.GCSStorage._get_bucket", lambda self: FakeGCSBucket(self.bucket_name, {}))
+    monkeypatch.setattr("app.storage.GCSStorage.upload_file", failing_upload)
+    client = make_client(
+        tmp_path,
+        storage_provider="gcs",
+        gcs_audio_bucket="voice-ai-audio-test",
+        gcs_artifact_bucket="voice-ai-artifact-test",
+    )
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "video_storage_failed"
 
 
 def test_video_localization_auto_uses_openai_pipeline_when_key_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

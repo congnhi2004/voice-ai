@@ -128,6 +128,23 @@ class GCSStorage:
             local_path=local_path,
         )
 
+    def download_bytes(self, storage_uri: str) -> bytes:
+        object_name = self.object_name_from_uri(storage_uri)
+        blob = self._get_bucket().blob(object_name)
+        return blob.download_as_bytes()
+
+    def download_to_filename(self, storage_uri: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        object_name = self.object_name_from_uri(storage_uri)
+        blob = self._get_bucket().blob(object_name)
+        blob.download_to_filename(str(destination))
+
+    def object_name_from_uri(self, storage_uri: str) -> str:
+        prefix = f"gs://{self.bucket_name}/"
+        if not storage_uri.startswith(prefix):
+            raise ValueError("GCS URI does not belong to the configured artifact bucket")
+        return storage_uri.removeprefix(prefix)
+
     def signed_url(self, object_name: str, method: str = "GET", content_type: str | None = None) -> str:
         blob = self._get_bucket().blob(object_name)
         kwargs = {

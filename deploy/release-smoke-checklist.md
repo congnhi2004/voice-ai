@@ -43,19 +43,42 @@ Expected:
 - Audio objects are created only after a successful GCS-backed release. Current app code may still write local filesystem artifacts; that is a live-deploy blocker if no object appears.
 - Video source/rendered/intermediate prefixes exist before commercial video release.
 
-## Job
+## Cloud Tasks
 
 ```bash
-gcloud run jobs describe voice-ai-video-localization \
+gcloud tasks queues describe "${CLOUD_TASKS_QUEUE:-voice-ai-video}" \
   --project="${PROJECT_ID}" \
-  --region="${REGION}"
+  --location="${REGION}" \
+  --format='yaml(name,state,rateLimits,retryConfig,stats)'
+
+gcloud run services get-iam-policy "${SERVICE_NAME}" \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --flatten='bindings[].members' \
+  --filter='bindings.role=roles/run.invoker AND bindings.members:voice-ai-tasks' \
+  --format='table(bindings.role,bindings.members)'
 ```
 
 Expected:
 
-- Job exists and uses the same image tag or digest as the service.
-- Job has no `GOOGLE_APPLICATION_CREDENTIALS` env var.
-- Secrets are mounted through Secret Manager references.
+- Queue exists with bounded dispatch rate and retry policy.
+- Cloud Tasks OIDC service account has `roles/run.invoker` on the Cloud Run service when handlers are private.
+- Service env shows `JOB_DISPATCH_MODE=cloud_tasks`; there is no Cloud Run Job deployment in the selected production path.
+
+## Observe Script
+
+```bash
+export GCP_PROJECT_ID="${PROJECT_ID}"
+export CLOUD_TASKS_QUEUE="${CLOUD_TASKS_QUEUE:-voice-ai-video}"
+export GCS_AUDIO_BUCKET="${GCS_AUDIO_BUCKET}"
+export GCS_ARTIFACT_BUCKET="${GCS_ARTIFACT_BUCKET}"
+./scripts/cloud-run-observe.sh
+```
+
+Expected:
+
+- Prints service URL, latest ready revision, traffic, image digest, redacted env/Secret Manager references, `/healthz`, `/readyz`, bucket lifecycle, Cloud Tasks status, and Cloud Logging rows.
+- If `SIGNED_URL_TO_TEST` is set, prints only the signed URL HTTP status code, not the signed URL.
 
 ## Logs And Rollback
 

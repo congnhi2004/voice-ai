@@ -122,6 +122,21 @@ class VideoLocalizationStatus(BaseModel):
     observability: ObservabilityInfo
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
+    storage: dict[str, Any] = Field(default_factory=dict)
+    dispatch: dict[str, Any] = Field(default_factory=dict)
+
+
+class VideoJobRequest(BaseModel):
+    job_id: str
+    input_filename: str
+    input_content_type: str | None = None
+    source_language: str
+    target_language: str = "vi"
+    voice_name: str | None = None
+    input_bytes: int
+    source_path: str
+    source_uri: str
+    created_request_id: str
 
 
 class PlanFeature(BaseModel):

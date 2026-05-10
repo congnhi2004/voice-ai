@@ -19,7 +19,7 @@ Official references checked on 2026-05-10:
 - Production uses Cloud Run runtime service identity, not mounted JSON service account keys.
 - Production audio is stored in Cloud Storage; local filesystem audio is only for local/dev.
 - Video localization uses FFmpeg in the container and durable Cloud Storage for source videos, intermediate artifacts, and rendered outputs.
-- Long-running video work should be submitted to Cloud Tasks and handled by a Cloud Run endpoint or split into Cloud Run Jobs when processing exceeds service/task deadlines.
+- Production async video dispatch is Cloud Tasks HTTP target to the Cloud Run service. Cloud Run Jobs are not part of the production path in this repo because the current backend exposes HTTP handlers and does not include a separate job entrypoint.
 - MLflow production endpoint is supplied through `MLFLOW_TRACKING_URI`; local compose runs MLflow at `http://localhost:5000`.
 - If a static frontend exists, build artifacts are expected under `frontend/dist` and can be served by the backend or copied into the image context. The Dockerfile does not build frontend assets.
 
@@ -99,6 +99,8 @@ export ENVIRONMENT=staging
 export SERVICE_NAME=voice-ai
 export ARTIFACT_REPOSITORY=voice-ai
 export CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=voice-ai-run@my-project.iam.gserviceaccount.com
+export CLOUD_TASKS_SERVICE_ACCOUNT=voice-ai-tasks@my-project.iam.gserviceaccount.com
+export CLOUD_TASKS_QUEUE=voice-ai-video
 export STORAGE_PROVIDER=gcs
 export GCS_AUDIO_BUCKET=my-voice-ai-audio
 export GCS_ARTIFACT_BUCKET=my-voice-ai-artifacts
@@ -114,7 +116,6 @@ Do not set `GOOGLE_APPLICATION_CREDENTIALS` for Cloud Run service or job deploys
 Templates:
 
 - `deploy/cloud-run-service.yaml.template`: service shape for review or `gcloud run services replace` after placeholder substitution.
-- `deploy/cloud-run-video-job.yaml.template`: Cloud Run job shape for off-request video processing.
 - `deploy/secret-manager-map.md`: secret names, GitHub variables/secrets, and IAM.
 
 ## GCS Lifecycle And Signed URLs
@@ -137,13 +138,14 @@ Keep source video, intermediate files, rendered video, and generated audio in pr
 `.github/workflows/deploy-cloud-run.yml` is manual through `workflow_dispatch` and environment-gated. Required setup:
 
 - Configure GitHub OIDC to Google Cloud.
-- Add environment secrets `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, `API_KEYS_SECRET_NAME`, and `OPENAI_API_KEY_SECRET_NAME`.
+- Add environment secrets `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, `API_KEYS_SECRET_NAME`, and `OPENAI_API_KEY_SECRET_NAME`. Add `RELEASE_SMOKE_API_KEY` only when the post-deploy smoke should call authenticated product endpoints.
 - Add environment variables listed in `deploy/secret-manager-map.md`.
 - Dispatch the workflow for `staging`; run `deploy/release-smoke-checklist.md`; then dispatch `production` with the same image tag or commit SHA.
+- The workflow deploys the pushed Artifact Registry image by digest, then runs `scripts/cloud-run-observe.sh` without printing secret values.
 
 ## Video Localization Operations
 
-Recommended production shape:
+Selected production shape:
 
 1. API receives metadata and writes source media to `gs://${GCS_ARTIFACT_BUCKET}/${GCS_SOURCE_VIDEO_PREFIX}`.
 2. API enqueues a Cloud Tasks HTTP task to `/internal/tasks/video-localization`.
@@ -154,9 +156,13 @@ Recommended production shape:
 
 Constraints:
 
-- Cloud Run service timeout can be raised to 3600 seconds; Cloud Tasks HTTP targets have their own dispatch deadline limits, so large jobs should checkpoint and re-enqueue or move to Cloud Run Jobs.
+- Cloud Run service timeout can be raised to 3600 seconds; Cloud Tasks HTTP targets have their own dispatch deadline limits, so large jobs should checkpoint and re-enqueue. Moving to Cloud Run Jobs would require a backend job entrypoint and a new deploy path.
 - The deploy workflow sets `--concurrency=1`, `--cpu=2`, `--memory=4Gi`, and `--timeout=3600` for FFmpeg-heavy processing. Tune after real media benchmarks.
 - Do not store uploaded or rendered media in the container filesystem except as temporary scratch space.
+
+Current backend caveat:
+
+- The repository's current backend still exposes synchronous public video creation at `POST /v1/video-localization/jobs`. The infra-selected async target is Cloud Tasks to a future internal HTTP handler; commercial approval must capture live evidence after that backend handler exists.
 
 ## Observation
 

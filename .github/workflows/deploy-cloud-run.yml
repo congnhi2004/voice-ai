@@ -23,11 +23,6 @@ on:
         description: "Image tag to build and deploy"
         required: true
         default: "manual"
-      deploy_video_job:
-        description: "Create or update the Cloud Run video job command"
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -35,7 +30,6 @@ permissions:
 
 env:
   IMAGE_NAME: voice-ai
-  VIDEO_JOB_NAME: voice-ai-video-localization
 
 jobs:
   verify:
@@ -108,14 +102,25 @@ jobs:
           gcloud auth configure-docker "${{ inputs.region }}-docker.pkg.dev" --quiet
 
       - name: Build and push image
+        id: image
         shell: bash
         env:
-          IMAGE_URI: ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'voice-ai' }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag == 'manual' && github.sha || inputs.image_tag }}
+          IMAGE_TAG_URI: ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'voice-ai' }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag == 'manual' && github.sha || inputs.image_tag }}
         run: |
           set -euo pipefail
-          docker build -t "${IMAGE_URI}" .
-          docker push "${IMAGE_URI}"
-          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+          docker build -t "${IMAGE_TAG_URI}" .
+          docker push "${IMAGE_TAG_URI}"
+          IMAGE_DIGEST="$(gcloud artifacts docker images describe "${IMAGE_TAG_URI}" --format='value(image_summary.digest)')"
+          if [[ -z "${IMAGE_DIGEST}" ]]; then
+            echo "Artifact Registry did not return an image digest for ${IMAGE_TAG_URI}" >&2
+            exit 1
+          fi
+          IMAGE_DIGEST_URI="${IMAGE_TAG_URI%:*}@${IMAGE_DIGEST}"
+          echo "IMAGE_TAG_URI=${IMAGE_TAG_URI}" >> "${GITHUB_ENV}"
+          echo "IMAGE_URI=${IMAGE_DIGEST_URI}" >> "${GITHUB_ENV}"
+          echo "image_tag_uri=${IMAGE_TAG_URI}" >> "${GITHUB_OUTPUT}"
+          echo "image_digest_uri=${IMAGE_DIGEST_URI}" >> "${GITHUB_OUTPUT}"
+          echo "Published ${IMAGE_DIGEST_URI}"
 
       - name: Deploy Cloud Run service
         id: deploy
@@ -134,9 +139,11 @@ jobs:
             OPENAI_TTS_RESPONSE_FORMAT=${{ vars.OPENAI_TTS_RESPONSE_FORMAT || 'wav' }}
             GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}
             GOOGLE_CLOUD_REGION=${{ inputs.region }}
+            STORAGE_PROVIDER=gcs
             AUDIO_STORAGE_MODE=gcs
             GCS_AUDIO_BUCKET=${{ vars.GCS_AUDIO_BUCKET }}
             GCS_AUDIO_PREFIX=voice-ai/audio
+            SIGNED_URL_TTL_SECONDS=3600
             VIDEO_LOCALIZATION_ENABLED=true
             VIDEO_STORAGE_MODE=gcs
             GCS_ARTIFACT_BUCKET=${{ vars.GCS_ARTIFACT_BUCKET }}
@@ -171,28 +178,21 @@ jobs:
             --concurrency=1
             --timeout=3600
 
-      - name: Create or update video Cloud Run job
-        if: ${{ inputs.deploy_video_job }}
+      - name: Post-deploy smoke and observability
         shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ inputs.region }}
+          SERVICE_NAME: ${{ inputs.service }}
+          CLOUD_TASKS_QUEUE: ${{ vars.CLOUD_TASKS_QUEUE || 'voice-ai-video' }}
+          GCS_AUDIO_BUCKET: ${{ vars.GCS_AUDIO_BUCKET }}
+          GCS_ARTIFACT_BUCKET: ${{ vars.GCS_ARTIFACT_BUCKET }}
+          RELEASE_SMOKE_API_KEY: ${{ secrets.RELEASE_SMOKE_API_KEY || '' }}
         run: |
           set -euo pipefail
-          if gcloud run jobs describe "${VIDEO_JOB_NAME}" --project="${{ vars.GCP_PROJECT_ID }}" --region="${{ inputs.region }}" >/dev/null 2>&1; then
-            job_command=(update)
-          else
-            job_command=(create)
-          fi
-          gcloud run jobs "${job_command[@]}" "${VIDEO_JOB_NAME}" \
-            --project="${{ vars.GCP_PROJECT_ID }}" \
-            --region="${{ inputs.region }}" \
-            --image="${IMAGE_URI}" \
-            --service-account="${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}" \
-            --memory=4Gi \
-            --cpu=2 \
-            --tasks=1 \
-            --parallelism=1 \
-            --task-timeout=3600 \
-            --set-env-vars="ENVIRONMENT=${{ inputs.environment }},SERVICE_VERSION=${{ github.sha }},TTS_PROVIDER=openai,OPENAI_TTS_MODEL=${{ vars.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts' }},OPENAI_TTS_VOICE=${{ vars.OPENAI_TTS_VOICE || 'marin' }},OPENAI_TTS_RESPONSE_FORMAT=${{ vars.OPENAI_TTS_RESPONSE_FORMAT || 'wav' }},GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_REGION=${{ inputs.region }},AUDIO_STORAGE_MODE=gcs,GCS_AUDIO_BUCKET=${{ vars.GCS_AUDIO_BUCKET }},GCS_AUDIO_PREFIX=voice-ai/audio,VIDEO_LOCALIZATION_ENABLED=true,VIDEO_STORAGE_MODE=gcs,GCS_ARTIFACT_BUCKET=${{ vars.GCS_ARTIFACT_BUCKET }},GCS_SOURCE_VIDEO_PREFIX=voice-ai/video/source,GCS_RENDERED_VIDEO_PREFIX=voice-ai/video/rendered,GCS_INTERMEDIATE_PREFIX=voice-ai/video/intermediate,JOB_DISPATCH_MODE=cloud_run_job,MLFLOW_TRACKING_URI=${{ vars.MLFLOW_TRACKING_URI }},MLFLOW_EXPERIMENT_NAME=voice-ai-tts-synthesis,MLFLOW_VIDEO_EXPERIMENT_NAME=voice-ai-video-localization,VIDEO_OBSERVABILITY_STAGES=upload,stt,translation,tts,alignment,render,delivery,LOG_LEVEL=INFO,STRUCTURED_LOGS=true,MAX_INPUT_CHARS=5000,MAX_UPLOAD_BYTES=524288000,REQUEST_TIMEOUT_SECONDS=3600,VIDEO_STAGE_TIMEOUT_SECONDS=3300,FFMPEG_THREADS=2" \
-            --set-secrets="API_KEYS=${{ secrets.API_KEYS_SECRET_NAME }}:latest,OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_SECRET_NAME }}:latest"
+          ./scripts/cloud-run-observe.sh
 
       - name: Print service URL
-        run: echo "${{ steps.deploy.outputs.url }}"
+        run: |
+          echo "${{ steps.deploy.outputs.url }}"
+          echo "Image digest: ${{ steps.image.outputs.image_digest_uri }}"

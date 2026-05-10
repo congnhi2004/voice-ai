@@ -44,6 +44,8 @@ spec:
               value: PROJECT_ID
             - name: GOOGLE_CLOUD_REGION
               value: REGION
+            - name: STORAGE_PROVIDER
+              value: gcs
             - name: AUDIO_STORAGE_MODE
               value: gcs
             - name: GCS_AUDIO_BUCKET
@@ -65,7 +67,15 @@ spec:
             - name: GCS_INTERMEDIATE_PREFIX
               value: voice-ai/video/intermediate
             - name: JOB_DISPATCH_MODE
-              value: cloud_run_job
+              value: cloud_tasks
+            - name: CLOUD_TASKS_QUEUE
+              value: voice-ai-video
+            - name: CLOUD_TASKS_LOCATION
+              value: REGION
+            - name: CLOUD_TASKS_HANDLER_PATH
+              value: /internal/tasks/video-localization
+            - name: CLOUD_TASKS_SERVICE_ACCOUNT
+              value: voice-ai-tasks@PROJECT_ID.iam.gserviceaccount.com
             - name: MLFLOW_TRACKING_URI
               value: https://mlflow.example.com
             - name: LOG_LEVEL

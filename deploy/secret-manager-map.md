@@ -20,8 +20,8 @@ Cloud Run service and job deploys should map these with `--set-secrets`, not pla
 | `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT` | `voice-ai-run@PROJECT_ID.iam.gserviceaccount.com` | Runtime identity for service and job. |
 | `GCS_AUDIO_BUCKET` | `voice-ai-prod-audio` | Private generated audio bucket. |
 | `GCS_ARTIFACT_BUCKET` | `voice-ai-prod-artifacts` | Private video source/intermediate/rendered artifact bucket. |
-| `CLOUD_TASKS_QUEUE` | `voice-ai-video` | Optional queue if the app dispatches video work through Cloud Tasks. |
-| `CLOUD_TASKS_SERVICE_ACCOUNT` | `voice-ai-tasks@PROJECT_ID.iam.gserviceaccount.com` | Optional OIDC identity for task handlers. |
+| `CLOUD_TASKS_QUEUE` | `voice-ai-video` | Production async video queue for Cloud Tasks HTTP dispatch. |
+| `CLOUD_TASKS_SERVICE_ACCOUNT` | `voice-ai-tasks@PROJECT_ID.iam.gserviceaccount.com` | OIDC identity used by Cloud Tasks when calling private task handlers. |
 | `MLFLOW_TRACKING_URI` | `https://mlflow.example.com` | Production MLflow endpoint. |
 | `OPENAI_TTS_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model. |
 | `OPENAI_TTS_VOICE` | `marin` | Commercial voice default proven in public demo. |
@@ -41,7 +41,7 @@ Runtime service account:
 - `roles/storage.objectAdmin` or narrower custom object permissions on the audio and artifact buckets.
 - Provider-specific roles only where used by active code. OpenAI TTS does not need Google Text-to-Speech IAM.
 
-Optional Cloud Tasks identity:
+Cloud Tasks identity:
 
 - `roles/run.invoker` on the private Cloud Run task handler.
 - Cloud Tasks service agent can impersonate the task service account for OIDC dispatch.

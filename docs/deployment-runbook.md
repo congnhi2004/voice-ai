@@ -79,9 +79,9 @@ Cloud Run is a managed platform for running code or containers on Google infrast
 Concrete artifacts for this repo:
 
 - `.github/workflows/ci.yml`: backend tests, frontend lint/test/build, compose config, Docker build, and video smoke hooks.
-- `.github/workflows/deploy-cloud-run.yml`: manual Cloud Run deploy through GitHub OIDC, Artifact Registry, Secret Manager mappings, and Cloud Run job update.
+- `.github/workflows/deploy-cloud-run.yml`: manual Cloud Run deploy through GitHub OIDC, Artifact Registry, Secret Manager mappings, image-digest deploy, and post-deploy observe/smoke checks.
 - `deploy/cloud-run-deploy-operator.sh`: dry-run-first operator deploy script.
-- `deploy/cloud-run-service.yaml.template` and `deploy/cloud-run-video-job.yaml.template`: service/job review templates.
+- `deploy/cloud-run-service.yaml.template`: Cloud Run service review template. Production async video dispatch is Cloud Tasks HTTP target to the service, not Cloud Run Jobs.
 - `deploy/gcs-audio-lifecycle.json` and `deploy/gcs-video-artifact-lifecycle.json`: lifecycle retention templates.
 - `deploy/secret-manager-map.md`: required GitHub secrets, GitHub variables, Secret Manager secrets, and IAM.
 - `deploy/release-smoke-checklist.md`: release smoke, storage, job, logs, and rollback commands.

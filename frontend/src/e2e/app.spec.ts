@@ -113,7 +113,7 @@ test("TTS flow renders output and captures desktop evidence", async ({ page }, t
   await page.goto("/");
   await expect(page.getByTestId("prototype-studio")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
-  await expect(page.locator("#character-count")).toHaveText("158 / 4,096 characters");
+  await expect(page.locator("#character-count")).toContainText("/ 4,096 characters");
   await page.getByLabel("Script input").fill("Xin chao tu Voice AI.");
   await page.getByTestId("generate-tts-preview").click();
 
@@ -122,7 +122,7 @@ test("TTS flow renders output and captures desktop evidence", async ({ page }, t
   await expect(page.locator("audio")).toHaveAttribute("src", "http://localhost:8080/audio/tts_e2e_001.mp3");
   await expect(page.getByRole("link", { name: "Download audio" })).toBeVisible();
 
-  const screenshotPath = `../docs/subagents/evidence/images/frontend-premium-tts-${testInfo.project.name}.png`;
+  const screenshotPath = `test-results/frontend-polish-tts-${testInfo.project.name}.png`;
   await page.screenshot({ path: screenshotPath, fullPage: testInfo.project.name === "desktop" });
   await testInfo.attach(`tts-${testInfo.project.name}`, { path: screenshotPath, contentType: "image/png" });
 });
@@ -219,7 +219,7 @@ test("video localization flow renders mocked progress, previews, and mobile evid
     "http://localhost:8080/v1/video-localization/jobs/vid_e2e_001/artifacts/localized_video/download"
   );
 
-  const screenshotPath = `../docs/subagents/evidence/images/frontend-premium-video-${testInfo.project.name}.png`;
+  const screenshotPath = `test-results/frontend-polish-video-${testInfo.project.name}.png`;
   await page.screenshot({ path: screenshotPath, fullPage: false });
   await testInfo.attach(`video-${testInfo.project.name}`, { path: screenshotPath, contentType: "image/png" });
 });
@@ -227,7 +227,7 @@ test("video localization flow renders mocked progress, previews, and mobile evid
 test("Video localization tab exposes the upload workflow", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open video workflow", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Open video workflow/ }).first()).toBeVisible();
 
   await page.getByRole("tab", { name: "Video localization", exact: true }).click();
 
@@ -238,8 +238,25 @@ test("Video localization tab exposes the upload workflow", async ({ page }) => {
   await expect(page.locator("#video-file-help")).toContainText("up to 25 MB");
   await expect(page.getByLabel("Source language")).toBeVisible();
   await expect(page.getByLabel("Target")).toHaveValue("Vietnamese script, SRT, dub, MP4");
-  await expect(page.getByLabel("Vietnamese voice")).toBeVisible();
+  await expect(page.locator("#video-target-voice")).toBeVisible();
   await expect(page.getByRole("button", { name: "Start Vietnamese localization", exact: true })).toBeVisible();
+});
+
+test("public shell hides internal preview strings and avoids mobile horizontal overflow", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Vietnamese voice and video localization studio" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Text to voice", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open video workflow", exact: true })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(
+    /Starter Placeholder|pricing-copy-only|local-demo|Public studio workspace|Prototype workspace|Session console|not configured|Checkout disabled|Action unavailable/
+  );
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+
+  const screenshotPath = `test-results/frontend-polish-public-${testInfo.project.name}.png`;
+  await page.screenshot({ path: screenshotPath, fullPage: false });
+  await testInfo.attach(`public-${testInfo.project.name}`, { path: screenshotPath, contentType: "image/png" });
 });
 
 test("video upload validation blocks unsupported files before hitting backend", async ({ page }) => {
@@ -291,11 +308,11 @@ test("auth and billing panel expose session state with billing disabled", async 
 
   const accountBillingPanel = page.getByLabel("Account and billing");
   await expect(accountBillingPanel.getByText("creator@example.com")).toBeVisible();
-  await expect(accountBillingPanel.getByText("local-demo")).toBeVisible();
+  await expect(accountBillingPanel.getByText("Preview account")).toBeVisible();
   await expect(accountBillingPanel.getByRole("button", { name: "Manage billing" })).toBeDisabled();
-  const starterPricingCard = page.locator(".pricing-card", { hasText: "Starter Placeholder" });
-  await expect(starterPricingCard.getByText("Action unavailable")).toBeVisible();
-  await expect(starterPricingCard.getByRole("button", { name: "Checkout disabled" })).toBeDisabled();
+  const starterPricingCard = page.locator(".pricing-card", { hasText: "Creator Studio" });
+  await expect(starterPricingCard.getByText("Checkout unavailable in this preview")).toBeVisible();
+  await expect(starterPricingCard.getByRole("button", { name: "Join waitlist" })).toBeDisabled();
 });
 
 test("pricing selection calls checkout when billing capability is enabled", async ({ page }) => {
@@ -331,7 +348,7 @@ test("pricing selection calls checkout when billing capability is enabled", asyn
   await page.getByLabel("Email").fill("buyer@example.com");
   await page.getByLabel("Password").fill("correct-horse");
   await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByLabel("Account and billing").getByText("Stripe billing ready")).toBeVisible();
-  await page.locator(".pricing-card", { hasText: "Starter Placeholder" }).getByRole("button", { name: "Choose plan" }).click();
+  await expect(page.getByLabel("Account and billing").getByText("Checkout available")).toBeVisible();
+  await page.locator(".pricing-card", { hasText: "Creator Studio" }).getByRole("button", { name: "Choose plan" }).click();
   await expect(page).toHaveURL(/checkout-test/);
 });

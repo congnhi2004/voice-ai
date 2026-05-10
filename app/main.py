@@ -44,11 +44,14 @@ from .storage import build_artifact_storage, build_audio_storage
 from .video_localization import (
     OPENAI_AUDIO_UPLOAD_LIMIT_BYTES,
     VideoJobStore,
+    VideoDispatchError,
     VideoProviderError,
     VideoRenderError,
     VideoValidationError,
+    build_video_dispatcher,
     build_video_provider,
-    localize_video,
+    create_queued_video_job,
+    process_video_job,
     validate_video_upload_metadata,
 )
 
@@ -78,7 +81,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     artifact_storage = build_artifact_storage(settings)
     provider = build_provider(settings)
     tracker = MlflowTracker(settings)
-    video_store = VideoJobStore(settings)
+    video_store = VideoJobStore(settings, artifact_storage if settings.video_artifact_storage_provider == "gcs" else None)
+    video_dispatcher = build_video_dispatcher(settings)
     auth_store = AuthBillingStore(settings.auth_storage_path)
     auth_service = AuthService(settings, auth_store)
     billing_service = BillingService(settings, auth_store, StripeBillingClient(settings))
@@ -90,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.provider = provider
     app.state.tracker = tracker
     app.state.video_store = video_store
+    app.state.video_dispatcher = video_dispatcher
     app.state.auth_store = auth_store
     app.state.auth_service = auth_service
     app.state.billing_service = billing_service
@@ -284,7 +289,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider_health = provider.healthcheck()
         storage_ready, storage_detail = storage.health()
         mlflow_configured, mlflow_ready, mlflow_detail = tracker.readiness()
-        ready = provider_health.ready and storage_ready and mlflow_ready
+        dispatch_ready, dispatch_detail = video_dispatcher.readiness()
+        ready = provider_health.ready and storage_ready and mlflow_ready and dispatch_ready
         body = {
             "status": "ready" if ready else "not_ready",
             "provider": {"name": provider_health.name, "ready": provider_health.ready, "detail": provider_health.detail},
@@ -295,6 +301,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "ready": True,
                 "ffmpeg_available": shutil.which(settings.ffmpeg_path) is not None,
                 "provider": build_video_provider(settings).name,
+                "storage": {
+                    "mode": settings.video_artifact_storage_provider,
+                    "job_metadata_mode": "gcs" if artifact_storage is not None else "local",
+                    "artifact_bucket": artifact_storage.bucket_name if artifact_storage is not None else None,
+                },
+                "dispatch": {
+                    "mode": settings.video_job_dispatch_mode,
+                    "ready": dispatch_ready,
+                    "detail": dispatch_detail,
+                    "worker_endpoint": "/internal/video-localization/tasks/{job_id}",
+                },
                 "detail": "auto mode uses OpenAI when OPENAI_API_KEY is set; local fallback remains available without credentials",
             },
         }
@@ -457,11 +474,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 job_id=job_id,
             )
         try:
-            status_body = localize_video(
+            status_body = create_queued_video_job(
                 settings=settings,
                 store=video_store,
-                tracker=tracker,
-                tts_provider=provider,
                 request_id=request_id_var.get(),
                 job_id=job_id,
                 input_filename=file.filename or "source.mp4",
@@ -471,17 +486,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 voice_name=voice_name,
                 artifact_storage=artifact_storage,
             )
+            if settings.video_job_dispatch_mode == "local_inline":
+                dispatch_result = video_dispatcher.dispatch(job_id)
+                status_body = process_video_job(
+                    settings=settings,
+                    store=video_store,
+                    tracker=tracker,
+                    tts_provider=provider,
+                    request_id=request_id_var.get(),
+                    job_id=job_id,
+                    artifact_storage=artifact_storage,
+                    raise_errors=True,
+                ).model_copy(update={"dispatch": {**status_body.dispatch, "task_name": dispatch_result.task_name}})
+                video_store.save_status(status_body)
+            else:
+                dispatch_result = video_dispatcher.dispatch(job_id)
+                status_body = status_body.model_copy(update={"dispatch": {**status_body.dispatch, "task_name": dispatch_result.task_name}})
+                video_store.save_status(status_body)
             logger.info(
-                "video_localization_completed",
+                "video_localization_job_accepted",
                 extra={
                     "request_id": request_id_var.get(),
                     "job_id": job_id,
                     "provider": status_body.provider.name,
-                    "input_chars": status_body.transcript_chars,
-                    "latency_ms": status_body.latency_ms,
+                    "status": status_body.status,
+                    "dispatch_mode": settings.video_job_dispatch_mode,
                 },
             )
             return status_body
+        except VideoDispatchError as exc:
+            current = video_store.load_status(job_id)
+            if current is not None:
+                video_store.save_status(current.model_copy(update={"status": "failed", "error": str(exc)}))
+            logger.exception("video_dispatch_failed", extra={"request_id": request_id_var.get(), "job_id": job_id, "error_code": "video_dispatch_failed"})
+            return problem("video_dispatch_failed", "Video localization job dispatch failed.", request_id_var.get(), 503, {"error": str(exc)}, job_id=job_id)
         except VideoValidationError as exc:
             logger.info(
                 "video_localization_rejected",
@@ -496,6 +534,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return problem(
                 "video_provider_failed",
                 "Video localization provider failed.",
+                request_id_var.get(),
+                503,
+                {"error": redact_configured_secrets(str(exc), settings)},
+                job_id=job_id,
+            )
+        except RuntimeError as exc:
+            logger.exception("video_storage_failed", extra={"request_id": request_id_var.get(), "job_id": job_id, "error_code": "video_storage_failed"})
+            return problem(
+                "video_storage_failed",
+                "Video localization storage failed.",
                 request_id_var.get(),
                 503,
                 {"error": redact_configured_secrets(str(exc), settings)},
@@ -520,6 +568,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         for artifact in status_body.artifacts
                     ]
                 }
+            )
+        return status_body
+
+    @app.post("/internal/video-localization/tasks/{job_id}")
+    async def process_video_localization_task(job_id: str, x_internal_task_token: str | None = Header(default=None)):
+        if settings.internal_task_token and x_internal_task_token != settings.internal_task_token:
+            return problem("invalid_internal_task_token", "Internal task token is invalid.", request_id_var.get(), 403, {"job_id": job_id})
+        status_body = process_video_job(
+            settings=settings,
+            store=video_store,
+            tracker=tracker,
+            tts_provider=provider,
+            request_id=request_id_var.get(),
+            job_id=job_id,
+            artifact_storage=artifact_storage,
+        )
+        if status_body.status == "failed":
+            logger.error(
+                "video_task_failed",
+                extra={"request_id": request_id_var.get(), "job_id": job_id, "error_code": "video_task_failed", "error_class": "VideoTaskFailed"},
+            )
+        else:
+            logger.info(
+                "video_task_completed",
+                extra={"request_id": request_id_var.get(), "job_id": job_id, "status": status_body.status, "dispatch_mode": settings.video_job_dispatch_mode},
             )
         return status_body
 

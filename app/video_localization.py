@@ -11,10 +11,12 @@ from pathlib import Path
 from .config import Settings
 from .models import (
     AudioOptions,
+    ObservabilityInfo,
     ProviderInfo,
     SynthesizeRequest,
     SubtitleSegment,
     VideoArtifact,
+    VideoJobRequest,
     VideoLocalizationStatus,
     VoiceSelection,
 )
@@ -45,6 +47,121 @@ class VideoRenderError(RuntimeError):
 
 class VideoProviderError(RuntimeError):
     """Raised when a real localization provider cannot complete a stage."""
+
+
+class VideoDispatchError(RuntimeError):
+    """Raised when a video localization job cannot be handed to a worker."""
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    mode: str
+    task_name: str | None = None
+    detail: str | None = None
+
+
+class LocalInlineVideoDispatcher:
+    mode = "local_inline"
+
+    def dispatch(self, job_id: str) -> DispatchResult:
+        return DispatchResult(mode=self.mode, task_name=f"local-inline:{job_id}", detail="processed in the API process for local development")
+
+    def readiness(self) -> tuple[bool, str | None]:
+        return True, "local inline dispatcher"
+
+
+class CloudTasksVideoDispatcher:
+    mode = "cloud_tasks"
+
+    def __init__(self, settings: Settings, client=None):
+        self.settings = settings
+        self._client = client
+        self._tasks_v2 = None
+
+    def readiness(self) -> tuple[bool, str | None]:
+        missing = [
+            name
+            for name, value in {
+                "CLOUD_TASKS_PROJECT_ID": self.settings.cloud_tasks_project_id,
+                "CLOUD_TASKS_QUEUE": self.settings.cloud_tasks_queue,
+                "CLOUD_TASKS_HANDLER_URL": self.handler_url,
+                "CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL": self.settings.cloud_tasks_service_account_email,
+            }.items()
+            if not value
+        ]
+        if missing:
+            return False, f"missing {', '.join(missing)}"
+        try:
+            self._get_client()
+        except Exception as exc:
+            return False, str(exc)
+        return True, None
+
+    @property
+    def handler_url(self) -> str | None:
+        return self.settings.cloud_tasks_handler_url
+
+    def _get_client(self):
+        if self._client is not None:
+            return self._client
+        try:
+            from google.cloud import tasks_v2
+        except Exception as exc:  # pragma: no cover - depends on optional dependency install
+            raise VideoDispatchError("google-cloud-tasks is required when VIDEO_JOB_DISPATCH_MODE=cloud_tasks") from exc
+        self._tasks_v2 = tasks_v2
+        self._client = tasks_v2.CloudTasksClient()
+        return self._client
+
+    def dispatch(self, job_id: str) -> DispatchResult:
+        ready, detail = self.readiness()
+        if not ready:
+            raise VideoDispatchError(detail or "Cloud Tasks dispatcher is not configured")
+        client = self._get_client()
+        tasks_v2 = self._tasks_v2
+        if tasks_v2 is None:
+            from google.cloud import tasks_v2 as imported_tasks_v2
+
+            tasks_v2 = imported_tasks_v2
+            self._tasks_v2 = tasks_v2
+        payload = json.dumps({"job_id": job_id}).encode("utf-8")
+        url = f"{self.handler_url.rstrip('/')}/{job_id}"
+        task = tasks_v2.Task(
+            http_request=tasks_v2.HttpRequest(
+                http_method=tasks_v2.HttpMethod.POST,
+                url=url,
+                headers={"Content-Type": "application/json"},
+                oidc_token=tasks_v2.OidcToken(
+                    service_account_email=self.settings.cloud_tasks_service_account_email,
+                    audience=self.settings.cloud_tasks_audience or self.handler_url,
+                ),
+                body=payload,
+            )
+        )
+        if self.settings.cloud_tasks_dispatch_deadline_seconds > 0:
+            from google.protobuf import duration_pb2
+
+            deadline = duration_pb2.Duration()
+            deadline.FromSeconds(self.settings.cloud_tasks_dispatch_deadline_seconds)
+            task.dispatch_deadline = deadline
+        created = client.create_task(
+            tasks_v2.CreateTaskRequest(
+                parent=client.queue_path(
+                    self.settings.cloud_tasks_project_id,
+                    self.settings.cloud_tasks_location,
+                    self.settings.cloud_tasks_queue,
+                ),
+                task=task,
+            )
+        )
+        return DispatchResult(mode=self.mode, task_name=getattr(created, "name", None), detail="queued in Cloud Tasks")
+
+
+def build_video_dispatcher(settings: Settings, client=None):
+    if settings.video_job_dispatch_mode == "cloud_tasks":
+        return CloudTasksVideoDispatcher(settings, client=client)
+    if settings.video_job_dispatch_mode == "local_inline":
+        return LocalInlineVideoDispatcher()
+    raise VideoDispatchError("VIDEO_JOB_DISPATCH_MODE must be local_inline or cloud_tasks")
 
 
 class LocalVideoLocalizationProvider:
@@ -152,23 +269,57 @@ class OpenAIVideoLocalizationProvider:
 
 
 class VideoJobStore:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, metadata_storage: GCSStorage | None = None):
         self.settings = settings
         self.root = settings.video_jobs_dir
+        self.metadata_storage = metadata_storage
         self.root.mkdir(parents=True, exist_ok=True)
 
     def job_dir(self, job_id: str) -> Path:
         return self.root / job_id
 
+    def request_path(self, job_id: str) -> Path:
+        return self.job_dir(job_id) / "request.json"
+
+    def status_path(self, job_id: str) -> Path:
+        return self.job_dir(job_id) / "status.json"
+
+    def source_path(self, job_id: str, input_filename: str) -> Path:
+        return self.job_dir(job_id) / safe_source_filename(input_filename)
+
     def save_status(self, status: VideoLocalizationStatus) -> None:
-        path = self.job_dir(status.job_id) / "status.json"
-        path.write_text(status.model_dump_json(indent=2), encoding="utf-8")
+        path = self.status_path(status.job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = status.model_dump_json(indent=2)
+        path.write_text(data, encoding="utf-8")
+        self._mirror_metadata(status.job_id, "status.json", data.encode("utf-8"))
 
     def load_status(self, job_id: str) -> VideoLocalizationStatus | None:
-        path = self.job_dir(job_id) / "status.json"
+        path = self.status_path(job_id)
         if not path.exists():
-            return None
+            data = self._load_metadata(job_id, "status.json")
+            if data is None:
+                return None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
         return VideoLocalizationStatus.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def save_request(self, request: VideoJobRequest) -> None:
+        path = self.request_path(request.job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = request.model_dump_json(indent=2)
+        path.write_text(data, encoding="utf-8")
+        self._mirror_metadata(request.job_id, "request.json", data.encode("utf-8"))
+
+    def load_request(self, job_id: str) -> VideoJobRequest | None:
+        path = self.request_path(job_id)
+        if not path.exists():
+            data = self._load_metadata(job_id, "request.json")
+            if data is None:
+                return None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return VideoJobRequest.model_validate_json(path.read_text(encoding="utf-8"))
 
     def artifact_path(self, job_id: str, filename: str) -> Path:
         path = (self.job_dir(job_id) / filename).resolve()
@@ -176,6 +327,23 @@ class VideoJobStore:
         if root not in path.parents and path != root:
             raise ValueError("Artifact path escapes job directory")
         return path
+
+    def _metadata_object_name(self, job_id: str, filename: str) -> str:
+        return join_object_name(self.settings.gcs_job_metadata_prefix, f"{job_id}/{filename}")
+
+    def _mirror_metadata(self, job_id: str, filename: str, data: bytes) -> None:
+        if self.metadata_storage is None:
+            return
+        self.metadata_storage.upload_bytes(self._metadata_object_name(job_id, filename), data, "application/json")
+
+    def _load_metadata(self, job_id: str, filename: str) -> bytes | None:
+        if self.metadata_storage is None:
+            return None
+        storage_uri = f"gs://{self.metadata_storage.bucket_name}/{self._metadata_object_name(job_id, filename)}"
+        try:
+            return self.metadata_storage.download_bytes(storage_uri)
+        except Exception:
+            return None
 
 
 def checksum(path: Path) -> str:
@@ -637,6 +805,139 @@ def localize_video(
         latency_ms=latency_ms,
         observability={"request_id": request_id, "mlflow_run_id": mlflow.run_id, "warnings": [mlflow.warning] if mlflow.warning else []},
         warnings=warnings,
+        storage=video_storage_metadata(settings, artifact_storage),
+        dispatch={"mode": settings.video_job_dispatch_mode, "worker": "video-localization-task"},
     )
     store.save_status(status)
     return status
+
+
+def video_storage_metadata(settings: Settings, artifact_storage: GCSStorage | None) -> dict:
+    return {
+        "mode": settings.video_artifact_storage_provider,
+        "job_metadata_mode": "gcs" if artifact_storage is not None else "local",
+        "source_mode": "gcs" if artifact_storage is not None else "local",
+        "artifact_bucket": artifact_storage.bucket_name if artifact_storage is not None else None,
+    }
+
+
+def create_queued_video_job(
+    *,
+    settings: Settings,
+    store: VideoJobStore,
+    request_id: str,
+    job_id: str,
+    input_filename: str,
+    input_content_type: str | None,
+    uploaded_bytes: bytes,
+    source_language: str,
+    voice_name: str | None,
+    artifact_storage: GCSStorage | None = None,
+) -> VideoLocalizationStatus:
+    job_dir = store.job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    source_path = store.source_path(job_id, input_filename)
+    source_path.write_bytes(uploaded_bytes)
+    source_uri = str(source_path)
+    if artifact_storage is not None:
+        stored_source = artifact_storage.upload_file(
+            source_path,
+            video_object_name(settings, job_id, "source_video", source_path.name),
+            input_content_type or "video/mp4",
+        )
+        source_uri = stored_source.storage_uri
+    request = VideoJobRequest(
+        job_id=job_id,
+        input_filename=input_filename,
+        input_content_type=input_content_type,
+        source_language=source_language,
+        target_language="vi",
+        voice_name=voice_name,
+        input_bytes=len(uploaded_bytes),
+        source_path=str(source_path),
+        source_uri=source_uri,
+        created_request_id=request_id,
+    )
+    store.save_request(request)
+    selected_provider = build_video_provider(settings)
+    status = VideoLocalizationStatus(
+        job_id=job_id,
+        status="queued",
+        source_language=source_language,
+        target_language="vi",
+        provider=ProviderInfo(name=selected_provider.name, fallback=selected_provider.fallback, model=selected_provider.model),
+        input_filename=input_filename,
+        input_bytes=len(uploaded_bytes),
+        transcript_chars=0,
+        translated_chars=0,
+        segments=[],
+        artifacts=[],
+        latency_ms=0,
+        observability=ObservabilityInfo(request_id=request_id),
+        storage=video_storage_metadata(settings, artifact_storage),
+        dispatch={"mode": settings.video_job_dispatch_mode, "worker": "video-localization-task"},
+    )
+    store.save_status(status)
+    return status
+
+
+def process_video_job(
+    *,
+    settings: Settings,
+    store: VideoJobStore,
+    tracker: MlflowTracker,
+    tts_provider: TTSProvider,
+    request_id: str,
+    job_id: str,
+    artifact_storage: GCSStorage | None = None,
+    raise_errors: bool = False,
+) -> VideoLocalizationStatus:
+    current = store.load_status(job_id)
+    if current is None:
+        raise VideoValidationError("Video localization job was not found.")
+    if current.status == "succeeded":
+        return current
+    request = store.load_request(job_id)
+    if request is None:
+        failed = current.model_copy(update={"status": "failed", "error": "Video job request metadata was not found."})
+        store.save_status(failed)
+        return failed
+
+    running = current.model_copy(update={"status": "running", "error": None})
+    store.save_status(running)
+    try:
+        source_path = Path(request.source_path)
+        if source_path.exists():
+            uploaded_bytes = source_path.read_bytes()
+        elif artifact_storage is not None and request.source_uri.startswith("gs://"):
+            uploaded_bytes = artifact_storage.download_bytes(request.source_uri)
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(uploaded_bytes)
+        else:
+            raise VideoValidationError("Stored source video artifact is not available.")
+        return localize_video(
+            settings=settings,
+            store=store,
+            tracker=tracker,
+            tts_provider=tts_provider,
+            request_id=request_id,
+            job_id=job_id,
+            input_filename=request.input_filename,
+            input_content_type=request.input_content_type,
+            uploaded_bytes=uploaded_bytes,
+            source_language=request.source_language,
+            voice_name=request.voice_name,
+            artifact_storage=artifact_storage,
+        )
+    except Exception as exc:
+        failed = running.model_copy(
+            update={
+                "status": "failed",
+                "error": str(exc),
+                "dispatch": {"mode": settings.video_job_dispatch_mode, "worker": "video-localization-task"},
+            }
+        )
+        store.save_status(failed)
+        if raise_errors:
+            raise
+        return failed
