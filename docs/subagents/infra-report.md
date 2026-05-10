@@ -570,3 +570,79 @@ taskset -c 0-3 ./scripts/local-services.sh restart
 - A host reboot, tmux server kill, Docker daemon restart, or manual `./scripts/local-services.sh stop` will remove the containers and close the public links until `taskset -c 0-3 ./scripts/local-services.sh restart` runs again.
 - Public MLflow exposure is not preserved by the helper; it is currently safest as localhost-only unless the helper is extended with explicit MLflow `--allowed-hosts` and CORS settings.
 - The local preview runs with local/demo provider settings and empty `API_KEYS`; do not treat this as a production security posture.
+
+## Real TTS Runtime Env Pass-Through Addendum
+
+Timestamp: `2026-05-10 15:02 +07`
+
+Role/skill used: Infra Real TTS Runtime Agent using `$voice-ai-infra-observability`.
+
+Context7 status: used MCP Docker Context7 for Docker runtime environment handling.
+
+- Library ID: `/docker/docs`
+- Topic: `docker run environment variables --env --env-file secret handling`
+- Relevant guidance applied: `docker run -e NAME`/`--env NAME` passes environment variables into the container, while secrets should not be baked into image `ENV`/`ARG` or printed into logs.
+
+### Runtime Script Changes
+
+Updated `scripts/local-services.sh`:
+
+- Removed the hardcoded backend `-e TTS_PROVIDER=local`.
+- Added a backend env allowlist passed through tmux and Docker by variable name: `TTS_PROVIDER`, `API_KEYS`, `OPENAI_API_KEY`, `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE`, `OPENAI_TTS_RESPONSE_FORMAT`, `GCP_PROJECT_ID`, `GOOGLE_APPLICATION_CREDENTIALS`, and `GOOGLE_CLOUD_REGION`.
+- Kept the default provider as `local` only when the caller does not set `TTS_PROVIDER`.
+- Added status output that reports provider and secret presence without printing secret values.
+- Kept backend/frontend/MLflow lifecycle under the existing tmux socket and taskset behavior.
+
+Updated `.env.example`:
+
+- Added OpenAI TTS placeholders only: `OPENAI_API_KEY=`, `OPENAI_TTS_MODEL=gpt-4o-mini-tts`, `OPENAI_TTS_VOICE=coral`, and `OPENAI_TTS_RESPONSE_FORMAT=wav`.
+
+### Safe Real TTS Restart
+
+Use this from a shell where command tracing is disabled. Replace placeholders locally; do not paste or commit real keys.
+
+```bash
+set +x
+export TTS_PROVIDER=openai
+export OPENAI_API_KEY="<set in shell or secret manager>"
+export OPENAI_TTS_MODEL="${OPENAI_TTS_MODEL:-gpt-4o-mini-tts}"
+export OPENAI_TTS_VOICE="${OPENAI_TTS_VOICE:-coral}"
+export OPENAI_TTS_RESPONSE_FORMAT="${OPENAI_TTS_RESPONSE_FORMAT:-wav}"
+taskset -c 0-3 ./scripts/local-services.sh restart
+taskset -c 0-3 ./scripts/local-services.sh status
+```
+
+Expected safe status shape:
+
+```text
+backend tts provider: openai
+backend OPENAI_API_KEY: set
+backend openai tts: model=gpt-4o-mini-tts voice=coral format=wav
+```
+
+The status command must never print the `OPENAI_API_KEY` value.
+
+### Verification
+
+Commands run:
+
+```bash
+bash -n scripts/local-services.sh
+taskset -c 0-3 ./scripts/local-services.sh status
+env -u OPENAI_API_KEY TTS_PROVIDER=local taskset -c 0-3 ./scripts/local-services.sh restart
+taskset -c 0-3 ./scripts/local-services.sh status
+```
+
+Observed result after safe local restart:
+
+```text
+backend health is reachable at http://127.0.0.1:8080/healthz
+frontend is reachable at http://127.0.0.1:4174/
+backend tts provider: local
+backend OPENAI_API_KEY: unset
+backend openai tts: model=default voice=default format=default
+backend GOOGLE_APPLICATION_CREDENTIALS: unset
+{"status":"ok","service":"voice-ai","version":"0.1.0"}
+```
+
+No real OpenAI key was used, echoed, written to files, or included in this report.

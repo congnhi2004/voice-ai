@@ -9,7 +9,11 @@ services:
     environment:
       ENVIRONMENT: local
       PORT: "8080"
-      TTS_PROVIDER: local
+      TTS_PROVIDER: ${TTS_PROVIDER:-local}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-gpt-4o-mini-tts}
+      OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-coral}
+      OPENAI_TTS_RESPONSE_FORMAT: ${OPENAI_TTS_RESPONSE_FORMAT:-wav}
       AUDIO_STORAGE_DIR: /app/data/audio
       VIDEO_STORAGE_DIR: /app/data/video
       ARTIFACT_STORAGE_DIR: /app/data/artifacts
@@ -49,6 +53,8 @@ services:
       - --default-artifact-root
       - /mlflow/artifacts
       - --serve-artifacts
+      - --allowed-hosts
+      - ${MLFLOW_ALLOWED_HOSTS:-mlflow,mlflow:5000,voice-ai-mlflow,voice-ai-mlflow:5000,localhost,localhost:*,127.0.0.1,127.0.0.1:*}
     ports:
       - "5000:5000"
     volumes:
@@ -72,7 +78,11 @@ services:
       - .env.example
     environment:
       ENVIRONMENT: local
-      TTS_PROVIDER: local
+      TTS_PROVIDER: ${TTS_PROVIDER:-local}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-gpt-4o-mini-tts}
+      OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-coral}
+      OPENAI_TTS_RESPONSE_FORMAT: ${OPENAI_TTS_RESPONSE_FORMAT:-wav}
       JOB_DISPATCH_MODE: worker
       AUDIO_STORAGE_DIR: /app/data/audio
       VIDEO_STORAGE_DIR: /app/data/video
