@@ -22,8 +22,9 @@ class Settings:
     google_application_credentials: str | None = None
     openai_api_key: str | None = None
     openai_tts_model: str = "gpt-4o-mini-tts"
-    openai_tts_voice: str = "coral"
+    openai_tts_voice: str = "marin"
     openai_tts_response_format: str = "wav"
+    espeak_ng_path: str = "espeak-ng"
     audio_storage_dir: Path = Path("data/audio")
     audio_base_url: str = "http://localhost:8080"
     api_keys: tuple[str, ...] = ()
@@ -64,8 +65,9 @@ def load_settings() -> Settings:
         google_application_credentials=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
-        openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "coral"),
+        openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "marin"),
         openai_tts_response_format=os.getenv("OPENAI_TTS_RESPONSE_FORMAT", "wav").lower(),
+        espeak_ng_path=os.getenv("ESPEAK_NG_PATH", "espeak-ng"),
         audio_storage_dir=Path(os.getenv("AUDIO_STORAGE_DIR", "data/audio")),
         audio_base_url=os.getenv("AUDIO_BASE_URL", "http://localhost:8080").rstrip("/"),
         api_keys=tuple(_split_csv(os.getenv("API_KEYS"))),

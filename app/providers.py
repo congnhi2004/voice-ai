@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import base64
-import hashlib
-import math
-import struct
+import shutil
+import subprocess
+import tempfile
 import time
 import wave
 from dataclasses import dataclass
@@ -29,6 +29,7 @@ class ProviderSynthesisResult:
     extension: str
     content_type: str
     duration_ms: int
+    sample_rate_hz: int
     provider_latency_ms: int
 
 
@@ -47,27 +48,41 @@ class TTSProvider:
         raise NotImplementedError
 
 
+class UnsupportedVoiceError(ValueError):
+    pass
+
+
 class LocalFallbackProvider(TTSProvider):
     name = "local"
     fallback = True
-    model = "deterministic-wav-tone-demo"
+    model = "espeak-ng-spoken-wav"
+
+    _voice_by_language = {
+        "en": "en-us",
+        "en-US": "en-us",
+        "vi": "vi",
+        "vi-VN": "vi-vn-x-central",
+    }
 
     _voices = [
         VoiceInfo(
-            name="local-en-US-test-voice",
+            name="local-en-US-espeak-ng",
             language_codes=["en-US"],
             ssml_gender="NEUTRAL",
             natural_sample_rate_hz=24000,
             supported_encodings=["LINEAR16", "MP3", "OGG_OPUS"],
         ),
         VoiceInfo(
-            name="local-vi-VN-test-voice",
+            name="local-vi-VN-espeak-ng-central",
             language_codes=["vi-VN"],
             ssml_gender="NEUTRAL",
             natural_sample_rate_hz=24000,
             supported_encodings=["LINEAR16", "MP3", "OGG_OPUS"],
         ),
     ]
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
 
     def list_voices(self, language_code: str | None = None) -> list[VoiceInfo]:
         if not language_code:
@@ -76,7 +91,7 @@ class LocalFallbackProvider(TTSProvider):
 
     def synthesize(self, request: SynthesizeRequest) -> ProviderSynthesisResult:
         started = time.perf_counter()
-        audio_bytes, duration_ms = self._make_wav(request.input_text, request.audio.sample_rate_hz)
+        audio_bytes, duration_ms, sample_rate_hz = self._make_spoken_wav(request)
         return ProviderSynthesisResult(
             provider_name=self.name,
             fallback=True,
@@ -85,30 +100,80 @@ class LocalFallbackProvider(TTSProvider):
             extension="wav",
             content_type="audio/wav",
             duration_ms=duration_ms,
+            sample_rate_hz=sample_rate_hz,
             provider_latency_ms=max(1, int((time.perf_counter() - started) * 1000)),
         )
 
     def healthcheck(self) -> ProviderHealth:
-        return ProviderHealth(name=self.name, ready=True)
+        binary = self._binary()
+        if not binary:
+            return ProviderHealth(
+                name=self.name,
+                ready=False,
+                detail="espeak-ng binary is not available; install espeak-ng or set ESPEAK_NG_PATH",
+            )
+        return ProviderHealth(name=self.name, ready=True, detail=f"speech engine: {Path(binary).name}")
 
-    def _make_wav(self, text: str, sample_rate_hz: int) -> tuple[bytes, int]:
-        import io
+    def _binary(self) -> str | None:
+        return shutil.which(self.settings.espeak_ng_path)
 
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        frequency = 220 + digest[0]
-        duration_seconds = min(2.0, max(0.4, 0.05 * max(1, len(text))))
-        frame_count = int(sample_rate_hz * duration_seconds)
-        amplitude = 12000
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(sample_rate_hz)
-            for frame in range(frame_count):
-                envelope = min(1.0, frame / max(1, int(sample_rate_hz * 0.03)))
-                sample = int(amplitude * envelope * math.sin(2 * math.pi * frequency * frame / sample_rate_hz))
-                wav.writeframesraw(struct.pack("<h", sample))
-        return buffer.getvalue(), int(duration_seconds * 1000)
+    def _voice_for(self, request: SynthesizeRequest) -> str:
+        if request.voice.name in {"local-vi-VN-espeak-ng-central", "vi-vn-x-central"}:
+            return "vi-vn-x-central"
+        if request.voice.name in {"local-en-US-espeak-ng", "en-us"}:
+            return "en-us"
+        return self._voice_by_language.get(request.voice.language_code, request.voice.language_code.lower())
+
+    def _make_spoken_wav(self, request: SynthesizeRequest) -> tuple[bytes, int, int]:
+        binary = self._binary()
+        if not binary:
+            raise RuntimeError("espeak-ng binary is not available; install espeak-ng or set ESPEAK_NG_PATH")
+
+        with tempfile.TemporaryDirectory(prefix="voice-ai-espeak-") as tmp_dir:
+            output_path = Path(tmp_dir) / "speech.wav"
+            speed_wpm = max(80, min(500, int(175 * request.audio.speaking_rate)))
+            pitch = max(0, min(99, int(50 + request.audio.pitch)))
+            amplitude = max(0, min(200, int(100 + request.audio.volume_gain_db)))
+            command = [
+                binary,
+                "-b",
+                "1",
+                "-v",
+                self._voice_for(request),
+                "-s",
+                str(speed_wpm),
+                "-p",
+                str(pitch),
+                "-a",
+                str(amplitude),
+                "-w",
+                str(output_path),
+            ]
+            if request.input_type == "ssml":
+                command.append("-m")
+            command.append(request.input_text)
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("espeak-ng speech synthesis timed out") from exc
+            if completed.returncode != 0:
+                detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
+                raise RuntimeError(f"espeak-ng speech synthesis failed: {detail}")
+            audio_bytes = output_path.read_bytes()
+            if not audio_bytes.startswith(b"RIFF"):
+                raise RuntimeError("espeak-ng did not produce a WAV/RIFF file")
+            with wave.open(str(output_path), "rb") as wav:
+                frame_rate = wav.getframerate()
+                frames = wav.getnframes()
+                duration_ms = int((frames / frame_rate) * 1000) if frame_rate else 0
+            return audio_bytes, duration_ms, frame_rate
 
 
 class GoogleTTSProvider(TTSProvider):
@@ -180,6 +245,7 @@ class GoogleTTSProvider(TTSProvider):
             extension=extension,
             content_type=content_type,
             duration_ms=0,
+            sample_rate_hz=request.audio.sample_rate_hz,
             provider_latency_ms=max(1, int((time.perf_counter() - started) * 1000)),
         )
 
@@ -220,7 +286,21 @@ class OpenAITTSProvider(TTSProvider):
     name = "openai"
     fallback = False
 
-    _voice_names = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
+    _voice_names = [
+        "marin",
+        "cedar",
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "fable",
+        "onyx",
+        "nova",
+        "sage",
+        "shimmer",
+        "verse",
+    ]
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -278,6 +358,7 @@ class OpenAITTSProvider(TTSProvider):
             extension=extension,
             content_type=content_type,
             duration_ms=0,
+            sample_rate_hz=request.audio.sample_rate_hz,
             provider_latency_ms=max(1, int((time.perf_counter() - started) * 1000)),
         )
 
@@ -294,14 +375,18 @@ class OpenAITTSProvider(TTSProvider):
         return ProviderHealth(name=self.name, ready=True)
 
     def _voice_for(self, request: SynthesizeRequest) -> str:
-        if request.voice.name in self._voice_names:
-            return request.voice.name
+        if request.voice.name:
+            if request.voice.name in self._voice_names:
+                return request.voice.name
+            raise UnsupportedVoiceError(
+                f"Unsupported OpenAI TTS voice '{request.voice.name}'. Supported built-in voices: {', '.join(self._voice_names)}"
+            )
         return self._configured_voice()
 
     def _configured_voice(self) -> str:
         voice = self.settings.openai_tts_voice
         if voice not in self._voice_names:
-            raise ValueError("OPENAI_TTS_VOICE must be one of the supported OpenAI TTS voices")
+            raise UnsupportedVoiceError(f"OPENAI_TTS_VOICE must be one of the supported OpenAI TTS voices: {', '.join(self._voice_names)}")
         return voice
 
     def _response_format(self) -> str:
@@ -322,7 +407,7 @@ class OpenAITTSProvider(TTSProvider):
 
 def build_provider(settings: Settings) -> TTSProvider:
     if settings.tts_provider == "local":
-        return LocalFallbackProvider()
+        return LocalFallbackProvider(settings)
     if settings.tts_provider == "google":
         return GoogleTTSProvider(settings)
     if settings.tts_provider == "openai":
@@ -335,4 +420,4 @@ def build_provider(settings: Settings) -> TTSProvider:
         openai = OpenAITTSProvider(settings)
         if openai.healthcheck().ready:
             return openai
-    return LocalFallbackProvider()
+    return LocalFallbackProvider(settings)

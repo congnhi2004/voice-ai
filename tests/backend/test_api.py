@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import struct
 import wave
 import shutil
 import subprocess
@@ -10,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.providers import OpenAITTSProvider, build_provider
+from app.providers import LocalFallbackProvider, OpenAITTSProvider, build_provider
 
 
 def make_client(tmp_path: Path, **overrides) -> TestClient:
@@ -30,7 +32,7 @@ def make_client(tmp_path: Path, **overrides) -> TestClient:
 def synth_payload(text: str = "Hello from tests.") -> dict:
     return {
         "text": text,
-        "voice": {"language_code": "en-US", "name": "local-en-US-test-voice", "ssml_gender": "NEUTRAL"},
+        "voice": {"language_code": "en-US", "name": "local-en-US-espeak-ng", "ssml_gender": "NEUTRAL"},
         "audio": {"encoding": "LINEAR16", "sample_rate_hz": 24000},
         "metadata": {"client_reference_id": "pytest"},
     }
@@ -42,6 +44,15 @@ def vi_synth_payload(text: str = "Xin chao tu bai kiem thu.") -> dict:
         "voice": {"language_code": "vi-VN", "name": "coral", "ssml_gender": "NEUTRAL"},
         "audio": {"encoding": "LINEAR16", "sample_rate_hz": 24000},
         "metadata": {"client_reference_id": "pytest-openai"},
+    }
+
+
+def vi_synth_payload_without_voice_name(text: str = "Xin chao tu bai kiem thu.") -> dict:
+    return {
+        "text": text,
+        "voice": {"language_code": "vi-VN", "ssml_gender": "NEUTRAL"},
+        "audio": {"encoding": "LINEAR16", "sample_rate_hz": 24000},
+        "metadata": {"client_reference_id": "pytest-openai-default"},
     }
 
 
@@ -69,6 +80,40 @@ class FakeOpenAIClient:
 
 
 FAKE_MP4_BYTES = b"\x00\x00\x00\x18ftypmp42demo-video"
+ORIGINAL_SHUTIL_WHICH = shutil.which
+
+
+def write_fake_spoken_wav(path: Path, sample_rate_hz: int = 22050) -> None:
+    frame_count = int(sample_rate_hz * 0.35)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate_hz)
+        for frame in range(frame_count):
+            frequency = 220 + ((frame // 900) % 7) * 45
+            envelope = min(1.0, frame / max(1, int(sample_rate_hz * 0.02)))
+            sample = int(9000 * envelope * math.sin(2 * math.pi * frequency * frame / sample_rate_hz))
+            wav.writeframesraw(struct.pack("<h", sample))
+
+
+@pytest.fixture
+def fake_espeak_ng(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_which(command: str) -> str | None:
+        if command == "espeak-ng":
+            return "/usr/bin/espeak-ng"
+        return ORIGINAL_SHUTIL_WHICH(command)
+
+    def fake_run(command, check=False, stdout=None, stderr=None, text=None, timeout=None):
+        calls.append(list(command))
+        output_path = Path(command[command.index("-w") + 1])
+        write_fake_spoken_wav(output_path)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("app.providers.shutil.which", fake_which)
+    monkeypatch.setattr("app.providers.subprocess.run", fake_run)
+    return calls
 
 
 def ffmpeg_command(*args: str) -> list[str]:
@@ -108,7 +153,7 @@ def valid_mp4_bytes(tmp_path: Path) -> bytes:
     return output.read_bytes()
 
 
-def test_health_and_readiness_local(tmp_path: Path):
+def test_health_and_readiness_local(tmp_path: Path, fake_espeak_ng: list[list[str]]):
     client = make_client(tmp_path)
 
     health = client.get("/healthz")
@@ -122,7 +167,7 @@ def test_health_and_readiness_local(tmp_path: Path):
     ready = client.get("/readyz")
     assert ready.status_code == 200
     body = ready.json()
-    assert body["provider"] == {"name": "local", "ready": True, "detail": None}
+    assert body["provider"] == {"name": "local", "ready": True, "detail": "speech engine: espeak-ng"}
     assert body["storage"]["ready"] is True
     assert body["mlflow"]["configured"] is False
 
@@ -135,11 +180,11 @@ def test_voices_contract(tmp_path: Path):
     assert response.status_code == 200
     body = response.json()
     assert body["provider"] == "local"
-    assert body["voices"][0]["name"] == "local-en-US-test-voice"
+    assert body["voices"][0]["name"] == "local-en-US-espeak-ng"
     assert "LINEAR16" in body["voices"][0]["supported_encodings"]
 
 
-def test_synthesize_local_fallback_creates_playable_wav(tmp_path: Path):
+def test_synthesize_local_fallback_creates_playable_spoken_wav(tmp_path: Path, fake_espeak_ng: list[list[str]]):
     client = make_client(tmp_path)
 
     response = client.post("/v1/synthesize", json=synth_payload(), headers={"X-Request-ID": "req_test"})
@@ -149,9 +194,10 @@ def test_synthesize_local_fallback_creates_playable_wav(tmp_path: Path):
     assert response.headers["X-Job-ID"].startswith("tts_")
     body = response.json()
     assert body["status"] == "succeeded"
-    assert body["provider"] == {"name": "local", "fallback": True, "model": "deterministic-wav-tone-demo"}
+    assert body["provider"] == {"name": "local", "fallback": True, "model": "espeak-ng-spoken-wav"}
     assert body["audio"]["encoding"] == "LINEAR16"
     assert body["audio"]["content_type"] == "audio/wav"
+    assert body["audio"]["sample_rate_hz"] == 22050
     assert body["audio"]["bytes"] > 1000
     assert body["observability"]["request_id"] == "req_test"
     assert body["metadata"]["client_reference_id"] == "pytest"
@@ -160,16 +206,38 @@ def test_synthesize_local_fallback_creates_playable_wav(tmp_path: Path):
     assert audio_path.exists()
     with wave.open(str(audio_path), "rb") as wav:
         assert wav.getnchannels() == 1
-        assert wav.getframerate() == 24000
+        assert wav.getframerate() == 22050
         assert wav.getnframes() > 0
 
     audio_response = client.get(body["audio_url"].replace("http://testserver", ""))
     assert audio_response.status_code == 200
     assert len(audio_response.content) == body["audio"]["bytes"]
     assert audio_response.content.startswith(b"RIFF")
+    assert fake_espeak_ng
+    assert fake_espeak_ng[0][:5] == ["/usr/bin/espeak-ng", "-b", "1", "-v", "en-us"]
+    assert "-w" in fake_espeak_ng[0]
 
 
-def test_public_urls_do_not_duplicate_audio_prefix_when_env_contains_audio_mount(tmp_path: Path):
+def test_local_provider_without_espeak_ng_fails_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(LocalFallbackProvider, "_binary", lambda self: None)
+    client = make_client(tmp_path)
+
+    ready = client.get("/readyz")
+    assert ready.status_code == 503
+    assert ready.json()["provider"] == {
+        "name": "local",
+        "ready": False,
+        "detail": "espeak-ng binary is not available; install espeak-ng or set ESPEAK_NG_PATH",
+    }
+
+    response = client.post("/v1/synthesize", json=synth_payload())
+    assert response.status_code == 503
+    body = response.json()
+    assert body["error"]["code"] == "synthesis_failed"
+    assert "espeak-ng binary is not available" in body["error"]["details"]["error"]
+
+
+def test_public_urls_do_not_duplicate_audio_prefix_when_env_contains_audio_mount(tmp_path: Path, fake_espeak_ng: list[list[str]]):
     client = make_client(tmp_path, audio_base_url="http://testserver/audio")
 
     tts = client.post("/v1/synthesize", json=synth_payload())
@@ -210,7 +278,7 @@ def test_video_localization_rejects_fake_mp4_with_clear_contract_error(tmp_path:
     assert body["job_id"].startswith("vid_")
 
 
-def test_api_key_auth_missing_and_valid(tmp_path: Path):
+def test_api_key_auth_missing_and_valid(tmp_path: Path, fake_espeak_ng: list[list[str]]):
     client = make_client(tmp_path, api_keys=("secret",))
 
     missing = client.post("/v1/synthesize", json=synth_payload())
@@ -264,8 +332,21 @@ def test_openai_voices_contract_when_provider_active(tmp_path: Path):
     body = response.json()
     assert body["provider"] == "openai"
     voice_names = {voice["name"] for voice in body["voices"]}
+    assert body["voices"][0]["name"] == "marin"
+    assert body["voices"][1]["name"] == "cedar"
+    assert {"marin", "cedar"} <= voice_names
     assert "coral" in voice_names
     assert all("LINEAR16" in voice["supported_encodings"] for voice in body["voices"])
+
+
+def test_openai_readiness_accepts_marin_and_cedar_configured_voices(tmp_path: Path):
+    for voice in ("marin", "cedar", "coral"):
+        client = make_client(tmp_path / voice, tts_provider="openai", openai_api_key="dummy_openai_ready", openai_tts_voice=voice)
+
+        response = client.get("/readyz")
+
+        assert response.status_code == 200
+        assert response.json()["provider"] == {"name": "openai", "ready": True, "detail": None}
 
 
 def test_synthesize_openai_uses_mocked_client_for_vietnamese_wav(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -289,6 +370,49 @@ def test_synthesize_openai_uses_mocked_client_for_vietnamese_wav(tmp_path: Path,
             "response_format": "wav",
         }
     ]
+
+
+def test_synthesize_openai_uses_marin_as_default_quality_voice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    speech = FakeSpeech(content=b"RIFFmock-openai-default-marin-audio")
+    monkeypatch.setattr(OpenAITTSProvider, "_get_client", lambda self: FakeOpenAIClient(speech))
+    client = make_client(tmp_path, tts_provider="openai", openai_api_key="dummy_openai_tts")
+
+    response = client.post("/v1/synthesize", json=vi_synth_payload_without_voice_name())
+
+    assert response.status_code == 200
+    assert speech.calls[0]["voice"] == "marin"
+
+
+def test_synthesize_openai_accepts_marin_and_cedar_request_voices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    speech = FakeSpeech(content=b"RIFFmock-openai-premium-voice-audio")
+    monkeypatch.setattr(OpenAITTSProvider, "_get_client", lambda self: FakeOpenAIClient(speech))
+    client = make_client(tmp_path, tts_provider="openai", openai_api_key="dummy_openai_tts")
+
+    for voice in ("marin", "cedar"):
+        payload = vi_synth_payload(f"Xin chao tu giong {voice}.")
+        payload["voice"]["name"] = voice
+        response = client.post("/v1/synthesize", json=payload)
+
+        assert response.status_code == 200
+
+    assert [call["voice"] for call in speech.calls] == ["marin", "cedar"]
+
+
+def test_synthesize_openai_rejects_invalid_request_voice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    speech = FakeSpeech(content=b"RIFFshould-not-be-used")
+    monkeypatch.setattr(OpenAITTSProvider, "_get_client", lambda self: FakeOpenAIClient(speech))
+    client = make_client(tmp_path, tts_provider="openai", openai_api_key="dummy_openai_tts")
+    payload = vi_synth_payload()
+    payload["voice"]["name"] = "not-a-real-openai-voice"
+
+    response = client.post("/v1/synthesize", json=payload)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "unsupported_voice"
+    assert "not-a-real-openai-voice" in body["error"]["details"]["error"]
+    assert "marin" in body["error"]["details"]["error"]
+    assert speech.calls == []
 
 
 def test_openai_mp3_response_format_is_reflected_in_audio_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -320,7 +444,7 @@ def test_openai_provider_errors_redact_configured_secret(tmp_path: Path, monkeyp
     assert secret not in caplog.text
 
 
-def test_video_localization_demo_workflow_creates_artifacts_and_status(tmp_path: Path, valid_mp4_bytes: bytes):
+def test_video_localization_demo_workflow_creates_artifacts_and_status(tmp_path: Path, valid_mp4_bytes: bytes, fake_espeak_ng: list[list[str]]):
     client = make_client(tmp_path)
 
     response = client.post(
@@ -360,7 +484,7 @@ def test_video_localization_demo_workflow_creates_artifacts_and_status(tmp_path:
             assert download.content.startswith(b"\x00\x00\x00")
 
 
-def test_public_video_artifact_urls_do_not_use_audio_prefix(tmp_path: Path, valid_mp4_bytes: bytes):
+def test_public_video_artifact_urls_do_not_use_audio_prefix(tmp_path: Path, valid_mp4_bytes: bytes, fake_espeak_ng: list[list[str]]):
     client = make_client(tmp_path, audio_base_url="http://testserver/audio")
 
     video = client.post(
@@ -377,7 +501,7 @@ def test_public_video_artifact_urls_do_not_use_audio_prefix(tmp_path: Path, vali
     assert b"Ban dich tieng Viet demo:" in srt_response.content
 
 
-def test_mlflow_tracking_records_tts_and_video_runs_when_configured(tmp_path: Path, valid_mp4_bytes: bytes):
+def test_mlflow_tracking_records_tts_and_video_runs_when_configured(tmp_path: Path, valid_mp4_bytes: bytes, fake_espeak_ng: list[list[str]]):
     import mlflow
 
     tracking_dir = tmp_path / "mlruns"

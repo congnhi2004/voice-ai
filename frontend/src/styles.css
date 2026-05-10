@@ -486,6 +486,27 @@ textarea {
   line-height: 1.45;
 }
 
+.voice-disclosure {
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(167, 89, 42, 0.26);
+  border-radius: 12px;
+  background: rgba(255, 247, 237, 0.78);
+  color: #6f3f1f;
+  padding: 12px 14px;
+  line-height: 1.45;
+}
+
+.voice-disclosure strong {
+  color: var(--copper, #a7592a);
+  font-size: 0.88rem;
+}
+
+.voice-disclosure span {
+  color: #6f3f1f;
+  font-size: 0.9rem;
+}
+
 .panel-section {
   padding: 22px;
   border-bottom: 1px solid #e6eaf0;

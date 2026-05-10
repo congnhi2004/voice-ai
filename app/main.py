@@ -18,7 +18,7 @@ from .frontend_support import DemoAuthStore, capabilities, demo_workspace_status
 from .logging_config import configure_logging
 from .models import AudioInfo, DemoAuthRequest, DemoLoginRequest, ObservabilityInfo, ProviderInfo, SynthesizeRequest, SynthesizeResponse
 from .observability import MlflowTracker
-from .providers import build_provider
+from .providers import UnsupportedVoiceError, build_provider
 from .storage import LocalAudioStorage
 from .video_localization import VideoJobStore, VideoRenderError, VideoValidationError, localize_video
 
@@ -241,7 +241,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 audio_encoding=audio_encoding,
                 speaking_rate=payload.audio.speaking_rate,
                 pitch=payload.audio.pitch,
-                sample_rate_hz=payload.audio.sample_rate_hz,
+                sample_rate_hz=result.sample_rate_hz,
                 input_type=payload.input_type,
                 input_chars=input_chars,
                 latency_ms=latency_ms,
@@ -280,12 +280,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 audio=AudioInfo(
                     encoding=audio_encoding,
                     bytes=stored.bytes,
-                    sample_rate_hz=payload.audio.sample_rate_hz,
+                    sample_rate_hz=result.sample_rate_hz,
                     checksum_sha256=stored.checksum_sha256,
                     content_type=result.content_type,
                 ),
                 observability=ObservabilityInfo(request_id=request_id_var.get(), mlflow_run_id=mlflow.run_id, warnings=warnings),
                 metadata=payload.metadata,
+            )
+        except UnsupportedVoiceError as exc:
+            return problem(
+                "unsupported_voice",
+                "Requested OpenAI TTS voice is not supported.",
+                request_id_var.get(),
+                400,
+                {"provider": provider.name, "error": str(exc)},
+                job_id=job_id,
             )
         except Exception as exc:
             logger.error(

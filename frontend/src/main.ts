@@ -118,7 +118,7 @@ type AppState = {
   error: string;
   history: HistoryItem[];
   videoFile: File | null;
-  videoSourceLanguage: "auto" | "zh" | "en";
+  videoSourceLanguage: "zh" | "zh-CN" | "en" | "en-US";
   videoTargetVoiceName: string;
   videoBurnSubtitles: boolean;
   videoClientReferenceId: string;
@@ -160,7 +160,7 @@ const demoSrt =
   "1\n00:00:00,000 --> 00:00:04,000\nXin chao. Day la ban thuyet minh tieng Viet.\n\n2\n00:00:04,000 --> 00:00:08,000\nKiem tra phu de, giong doc va video cuoi cung truoc khi tai ve.";
 
 const state: AppState = {
-  activeWorkflow: "video",
+  activeWorkflow: "tts",
   authMode: "register",
   showAuthPanel: false,
   demoUser: localStorage.getItem(storageKeys.demoUser) || "",
@@ -174,7 +174,7 @@ const state: AppState = {
   selectedLanguage: fallbackVoices[0].language_codes[0],
   encoding: "MP3",
   mode: "text",
-  text: "Paste a short product script here to create a Vietnamese voiceover preview while the video pipeline is being tested.",
+  text: "Xin chao, day la ban nghe thu cua Voice AI. Hay dan kich ban ngan vao day, chon giong doc, dieu chinh toc do, roi tao tep am thanh co the nghe va tai ve ngay.",
   speakingRate: 1,
   pitch: 0,
   volumeGainDb: 0,
@@ -184,7 +184,7 @@ const state: AppState = {
   error: "",
   history: readJson<HistoryItem[]>(storageKeys.history, []),
   videoFile: null,
-  videoSourceLanguage: "auto",
+  videoSourceLanguage: "en-US",
   videoTargetVoiceName: "vi-VN-Standard-A",
   videoBurnSubtitles: true,
   videoClientReferenceId: "",
@@ -512,19 +512,19 @@ function render() {
     <main>
       <section id="prototype" class="hero-studio" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow">Instant Vietnamese localization prototype</p>
-          <h1 id="hero-title">Vietnamese video localization test studio</h1>
+          <p class="eyebrow">Text to real voice in the first screen</p>
+          <h1 id="hero-title">Voice AI studio that speaks immediately</h1>
           <p class="hero-lede">
-            Chinese/English video -> Vietnamese script, subtitles, voice dub, and MP4. Upload a clip and test the core flow first.
+            Paste a script, choose an OpenAI voice, tune delivery, generate audio, replay it, and download the result before reading anything else.
           </p>
           <div class="hero-actions">
-            <a class="primary-link" href="#studio">Test video prototype</a>
-            <button class="secondary-button" id="hero-tts-button" type="button" aria-label="Open quick TTS demo">Try quick TTS</button>
+            <a class="primary-link" href="#studio">Generate voice now</a>
+            <button class="secondary-button" id="hero-video-button" type="button" aria-label="Open video localization workflow">Video localization</button>
           </div>
           <div class="proof-strip" aria-label="Product capabilities">
-            <span><b>Input</b> Chinese or English source video</span>
-            <span><b>Review</b> Vietnamese script and subtitle timing</span>
-            <span><b>Export</b> Dubbed audio and final MP4</span>
+            <span><b>Provider</b> Live OpenAI status and local fallback visibility</span>
+            <span><b>Control</b> Voice, language, format, rate, pitch, and gain</span>
+            <span><b>Output</b> Native player, job metadata, history, and download</span>
           </div>
         </div>
 
@@ -535,9 +535,9 @@ function render() {
               <strong>${state.demoUser ? escapeHtml(state.demoUser) : "Public prototype"}</strong>
             </div>
             <div class="studio-stats" aria-label="Prototype status summary">
-              <span>Pipeline 7 steps</span>
+              <span>OpenAI voices</span>
               <span>Target vi-VN</span>
-              <span>Artifacts 4</span>
+              <span>Audio export</span>
             </div>
             <div class="health-pill ${readinessLabel === "ready" ? "is-ready" : ""}" aria-live="polite">
               <span class="status-dot" aria-hidden="true"></span>
@@ -560,8 +560,8 @@ function render() {
           </form>
 
           <div class="workflow-switch" role="tablist" aria-label="Prototype workflow">
-            <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" data-testid="workflow-video-localization-tab">Video localization</button>
             <button id="workflow-tts" class="${state.activeWorkflow === "tts" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "tts"}" aria-label="Open quick TTS workflow tab" data-testid="workflow-quick-tts-tab">Quick TTS</button>
+            <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" data-testid="workflow-video-localization-tab">Video localization</button>
           </div>
 
           <div class="workspace-grid">
@@ -579,23 +579,23 @@ function render() {
 
       <section id="product" class="content-section product-grid">
         <div>
-          <p class="eyebrow">Product-led localization</p>
-          <h2>Built for teams turning global video into Vietnamese-ready assets.</h2>
+          <p class="eyebrow">Product-led voice creation</p>
+          <h2>Built for teams that need fast, reviewable voice output before committing to a production pipeline.</h2>
         </div>
-        ${featureCard("01", "Fast prototype loop", "Upload a source video, confirm language, choose a Vietnamese voice, and see review states without digging through API docs.")}
-        ${featureCard("02", "Production artifact model", "Transcript, SRT, dubbed audio, render logs, and final MP4 are first-class outputs instead of hidden background files.")}
-        ${featureCard("03", "Studio and API posture", "The interface is usable by content teams while preserving backend-configured APIs for developer integration.")}
+        ${featureCard("01", "Immediate voice test", "The top screen is the working TTS flow: script, provider status, voice controls, generation, playback, and download.")}
+        ${featureCard("02", "Localization path", "Video upload, transcript, SRT, dubbed audio, and final MP4 review stay available as the next workflow instead of replacing TTS.")}
+        ${featureCard("03", "Studio and API posture", "Content teams get a usable product surface while developers keep the backend-configured API base and request metadata.")}
       </section>
 
       <section id="workflow" class="content-section workflow-explainer">
         <div>
           <p class="eyebrow">Workflow</p>
-          <h2>From source video to Vietnamese delivery package.</h2>
+          <h2>From text preview to Vietnamese delivery package.</h2>
         </div>
         <ol class="step-list">
-          <li><span>1</span><strong>Upload</strong><p>Drop in a Chinese or English video and choose auto-detect or a fixed source language.</p></li>
-          <li><span>2</span><strong>Review text</strong><p>Inspect Vietnamese script and subtitle timing before handoff or final rendering.</p></li>
-          <li><span>3</span><strong>Dub</strong><p>Generate Vietnamese voiceover with clear voice metadata, rate, pitch, and provider status.</p></li>
+          <li><span>1</span><strong>Write</strong><p>Paste a script, select text or SSML mode, and keep character limits visible.</p></li>
+          <li><span>2</span><strong>Tune</strong><p>Choose voice, language, format, speaking rate, pitch, and gain before spending a request.</p></li>
+          <li><span>3</span><strong>Generate</strong><p>Create a voiceover with clear provider metadata, loading state, and inline errors.</p></li>
           <li><span>4</span><strong>Export</strong><p>Download transcript, SRT, audio, and final MP4 when the backend publishes artifacts.</p></li>
         </ol>
       </section>
@@ -606,7 +606,7 @@ function render() {
           <h2>Transparent tiers for prototype, creator, studio, and enterprise use.</h2>
         </div>
         <div class="pricing-grid">
-          ${pricingCard("Free Demo", "$0", "Prototype testing", ["Short TTS previews", "Video UI demo states", "No commercial usage claim"])}
+          ${pricingCard("Free Demo", "$0", "Prototype testing", ["Short TTS previews", "Video UI demo states", "Synthetic voice disclosure included"])}
           ${pricingCard("Creator", "$29", "Solo production", ["Monthly voice minutes", "Transcript and SRT downloads", "Commercial rights subject to provider terms"])}
           ${pricingCard("Studio", "$149", "Team localization", ["Workspace history", "Batch review workflow", "Priority render queue when backend supports it"])}
           ${pricingCard("Enterprise", "Custom", "Security and scale", ["Backend-managed credentials", "Private deployment options", "Audit logs, Cloud logs, and MLflow observability"])}
@@ -629,7 +629,7 @@ function render() {
         <div>
           <p class="eyebrow">Docs</p>
           <h2>Backend assumptions are explicit.</h2>
-          <p>TTS follows the documented /v1/voices and /v1/synthesize contract. Video localization currently assumes /v1/video-localization/jobs plus job polling until the backend contract is finalized.</p>
+          <p>TTS follows the documented /v1/voices and /v1/synthesize contract. Video localization posts file, source language, target language, and voice name to /v1/video-localization/jobs, then polls job status.</p>
         </div>
         <code>VITE_API_BASE_URL=http://&lt;api-host&gt;:8080 npm run dev -- --host 0.0.0.0 --port 5173</code>
       </section>
@@ -649,9 +649,9 @@ function ttsFormMarkup() {
   return `
     <form id="synthesis-form" class="synthesis-form" aria-label="Synthesize speech">
       <div class="prototype-header">
-        <span class="mini-label">No-file audio test</span>
-        <h2>Quick TTS studio</h2>
-        <p>Generate a short voiceover preview when you want to test audio without uploading a video file.</p>
+        <span class="mini-label">Working first-screen workflow</span>
+        <h2>Text to real voice studio</h2>
+        <p>Generate speech with the current backend provider. OpenAI voices are synthetic; disclose AI-generated audio to listeners where required.</p>
       </div>
       <div class="mode-row" role="radiogroup" aria-label="Input mode">
         <label><input type="radio" name="mode" value="text" ${state.mode === "text" ? "checked" : ""} /> Plain text</label>
@@ -673,6 +673,10 @@ function ttsFormMarkup() {
           .map((encoding) => `<option value="${escapeHtml(encoding)}" ${encoding === state.encoding ? "selected" : ""}>${escapeHtml(encoding)}</option>`)
           .join("")}</select></label>
         <label class="field"><span>Client reference</span><input id="client-reference-id" type="text" value="${escapeHtml(state.clientReferenceId)}" placeholder="script-123" /></label>
+      </div>
+      <div class="voice-disclosure" role="note">
+        <strong>AI voice disclosure</strong>
+        <span>Generated audio uses synthetic voice technology. Keep consent, labeling, and commercial usage rules visible in your publishing workflow.</span>
       </div>
       <div class="slider-grid">
         ${rangeControl("speaking-rate", "Speaking rate", state.speakingRate, 0.25, 4, 0.05, "x")}
@@ -707,9 +711,10 @@ function videoFormMarkup() {
       </label>
       <div class="control-grid video-controls">
         <label class="field"><span>Source language</span><select id="video-source-language">
-          <option value="auto" ${state.videoSourceLanguage === "auto" ? "selected" : ""}>Auto detect Chinese or English</option>
-          <option value="zh" ${state.videoSourceLanguage === "zh" ? "selected" : ""}>Chinese</option>
+          <option value="en-US" ${state.videoSourceLanguage === "en-US" ? "selected" : ""}>English (US)</option>
           <option value="en" ${state.videoSourceLanguage === "en" ? "selected" : ""}>English</option>
+          <option value="zh-CN" ${state.videoSourceLanguage === "zh-CN" ? "selected" : ""}>Chinese (Simplified)</option>
+          <option value="zh" ${state.videoSourceLanguage === "zh" ? "selected" : ""}>Chinese</option>
         </select></label>
         <label class="field"><span>Target</span><input type="text" value="Vietnamese script, SRT, dub, MP4" disabled /></label>
         <label class="field"><span>Vietnamese voice</span><select id="video-target-voice">${voices
@@ -742,7 +747,7 @@ function ttsOutputMarkup() {
           ? skeletonOutput()
           : state.latest
             ? outputMarkup()
-            : `<div class="empty-state"><p>Generate a short voiceover when you want to test without a video file.</p></div>`
+            : `<div class="empty-state"><p>No audio yet. Paste text, choose a voice, and generate a preview to see the player and download link here.</p></div>`
       }
     </section>
   `;
@@ -932,8 +937,8 @@ function bindEvents() {
     state.activeWorkflow = "video";
     render();
   });
-  document.querySelector<HTMLButtonElement>("#hero-tts-button")?.addEventListener("click", () => {
-    state.activeWorkflow = "tts";
+  document.querySelector<HTMLButtonElement>("#hero-video-button")?.addEventListener("click", () => {
+    state.activeWorkflow = "video";
     document.querySelector("#studio")?.scrollIntoView({ behavior: "smooth" });
     render();
   });

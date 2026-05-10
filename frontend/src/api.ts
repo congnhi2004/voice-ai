@@ -75,7 +75,7 @@ export type SynthesizeResponse = {
 
 export type VideoLocalizationRequest = {
   video: File;
-  source_language: "zh" | "en" | "auto";
+  source_language: "zh" | "zh-CN" | "en" | "en-US";
   target_language: "vi";
   target_voice_name?: string;
   target_voice_language_code?: string;
@@ -247,16 +247,11 @@ export class VoiceAiClient {
 
   async startVideoLocalization(payload: VideoLocalizationRequest, idempotencyKey?: string) {
     const body = new FormData();
-    body.set("video", payload.video);
+    body.set("file", payload.video);
     body.set("source_language", payload.source_language);
     body.set("target_language", payload.target_language);
-    body.set("generate_subtitles", String(payload.generate_subtitles));
-    body.set("burn_subtitles", String(payload.burn_subtitles));
     if (payload.target_voice_name) {
-      body.set("target_voice_name", payload.target_voice_name);
-    }
-    if (payload.target_voice_language_code) {
-      body.set("target_voice_language_code", payload.target_voice_language_code);
+      body.set("voice_name", payload.target_voice_name);
     }
     if (payload.metadata?.client_reference_id) {
       body.set("client_reference_id", payload.metadata.client_reference_id);

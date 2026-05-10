@@ -57,9 +57,7 @@ test("TTS flow renders output and captures desktop evidence", async ({ page }, t
 
   await page.goto("/");
   await expect(page.getByTestId("prototype-studio")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Video to Vietnamese studio" })).toBeVisible();
-  await page.getByTestId("workflow-quick-tts-tab").click();
-  await expect(page.getByRole("heading", { name: "Quick TTS studio" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
   await page.getByLabel("Script input").fill("Xin chao tu Voice AI.");
   await page.getByTestId("generate-tts-preview").click();
 
@@ -100,6 +98,8 @@ test("video localization flow renders mocked progress, previews, and mobile evid
 
   await page.goto("/");
   await expect(page.getByTestId("prototype-studio")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
+  await page.getByTestId("workflow-video-localization-tab").click();
   await expect(page.getByRole("heading", { name: "Video to Vietnamese studio" })).toBeVisible();
   await page.setInputFiles("#video-file", {
     name: "sample.mp4",
