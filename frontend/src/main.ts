@@ -206,7 +206,8 @@ const fallbackPlans: PricingPlan[] = [
   }
 ];
 
-const videoUploadLimitBytes = 250 * 1024 * 1024;
+const openAiTtsInputLimitChars = 4096;
+const publicOpenAiVideoUploadLimitBytes = 25 * 1024 * 1024;
 const acceptedVideoExtensions = [".mp4", ".mov", ".webm", ".m4v"];
 
 const state: AppState = {
@@ -357,6 +358,63 @@ function formatNumber(value?: number, suffix = "") {
   return typeof value === "number" ? `${value.toLocaleString()}${suffix}` : "Not reported";
 }
 
+function firstPositiveNumber(...values: Array<number | undefined>) {
+  return values.find((value) => typeof value === "number" && Number.isFinite(value) && value > 0);
+}
+
+function activeProviderName() {
+  return (state.capabilities?.tts?.active_provider || state.readiness?.provider?.name || "").toLowerCase();
+}
+
+function isOpenAiProvider() {
+  return activeProviderName().includes("openai");
+}
+
+function ttsCharacterLimit() {
+  const tts = state.capabilities?.tts;
+  const exposedLimit = firstPositiveNumber(
+    tts?.max_input_chars,
+    tts?.max_input_characters,
+    tts?.limits?.max_input_chars,
+    tts?.limits?.max_input_characters,
+    tts?.limits?.max_text_chars
+  );
+
+  if (isOpenAiProvider()) {
+    return Math.min(exposedLimit ?? openAiTtsInputLimitChars, openAiTtsInputLimitChars);
+  }
+
+  return exposedLimit ?? openAiTtsInputLimitChars;
+}
+
+function videoUploadLimitBytes() {
+  const video = state.capabilities?.video_localization;
+  const exposedBytes = firstPositiveNumber(
+    video?.max_upload_bytes,
+    video?.max_file_size_bytes,
+    video?.limits?.max_upload_bytes,
+    video?.limits?.max_file_size_bytes
+  );
+  const exposedMegabytes = firstPositiveNumber(
+    video?.max_upload_mb,
+    video?.max_file_size_mb,
+    video?.limits?.max_upload_mb,
+    video?.limits?.max_file_size_mb
+  );
+  const exposedLimit = exposedBytes ?? (exposedMegabytes ? exposedMegabytes * 1024 * 1024 : undefined);
+
+  if (isOpenAiProvider()) {
+    return Math.min(exposedLimit ?? publicOpenAiVideoUploadLimitBytes, publicOpenAiVideoUploadLimitBytes);
+  }
+
+  return exposedLimit ?? publicOpenAiVideoUploadLimitBytes;
+}
+
+function formatMegabytes(bytes: number) {
+  const megabytes = bytes / 1024 / 1024;
+  return `${Number.isInteger(megabytes) ? megabytes.toLocaleString() : megabytes.toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
+}
+
 function formatError(error: unknown) {
   if (error instanceof ApiError) {
     const details = [error.code, error.status ? `HTTP ${error.status}` : "", error.requestId ? `request ${error.requestId}` : ""]
@@ -384,8 +442,9 @@ function validateVideoFile(file: File | null) {
     return "The selected video is empty. Choose a source file with audio to localize.";
   }
 
-  if (file.size > videoUploadLimitBytes) {
-    return "The selected video is larger than the 250 MB MVP upload limit.";
+  const uploadLimit = videoUploadLimitBytes();
+  if (file.size > uploadLimit) {
+    return `The selected video is larger than the ${formatMegabytes(uploadLimit)} upload limit for the current provider path.`;
   }
 
   return "";
@@ -445,9 +504,7 @@ async function refreshStatus() {
 
     const rejected = [readiness, voiceResponse].find((result) => result.status === "rejected");
     if (rejected?.status === "rejected") {
-      const message = `${formatError(rejected.reason)} Fallback voices remain available for prototype testing.`;
-      state.error = message;
-      state.videoError = message;
+      state.billingMessage = "Backend status is unavailable. Fallback voices remain available for local prototype testing.";
     }
   } finally {
     state.voiceLoading = false;
@@ -463,8 +520,9 @@ async function synthesize() {
     return;
   }
 
-  if (content.length > 5000) {
-    state.error = "Input exceeds the MVP limit of 5,000 characters.";
+  const characterLimit = ttsCharacterLimit();
+  if (content.length > characterLimit) {
+    state.error = `Input exceeds the ${characterLimit.toLocaleString()} character limit for the current provider path.`;
     render();
     return;
   }
@@ -872,19 +930,18 @@ function render() {
     </header>
 
     <main>
-      <section id="prototype" class="studio-stage command-center" aria-labelledby="hero-title">
-        <div class="studio-intro hero-console">
+      <section id="prototype" class="studio-stage" aria-labelledby="hero-title">
+        <div class="studio-intro">
           <div>
-            <p class="eyebrow">Live production console</p>
-            <h1 id="hero-title">Voice AI studio for real voice output and Vietnamese-aware dubbing.</h1>
+            <p class="eyebrow">Live production studio</p>
+            <h1 id="hero-title">Voice AI production studio</h1>
             <p class="hero-lede">
-              Turn a script or source video into a reviewable delivery package: real voice audio, Vietnamese script, timed subtitles, dubbed track, final media, and provider readiness in one workspace.
+              Generate TTS or localize English/Chinese source video into Vietnamese script, subtitles, dubbed audio, and MP4.
             </p>
             <div class="signal-strip" aria-label="Production signals">
               <span>Real voice preview</span>
               <span>Vietnamese script review</span>
-              <span>Subtitle and voice package</span>
-              <span>Provider readiness</span>
+              <span>SRT, dub, MP4 exports</span>
             </div>
           </div>
           <div class="status-rail" aria-label="Live studio status">
@@ -944,20 +1001,6 @@ function render() {
             </div>
           </div>
 
-          <form id="settings-form" class="settings-grid" aria-label="API connection settings">
-            <label class="field">
-              <span>Backend API URL</span>
-              <input id="base-url" type="url" value="${escapeHtml(state.baseUrl)}" autocomplete="url" />
-            </label>
-            <label class="field">
-              <span>Backend API key</span>
-              <input id="api-key" type="password" value="${escapeHtml(state.apiKey)}" autocomplete="off" placeholder="Session only; never stored" />
-            </label>
-            <button class="secondary-button" type="submit" ${state.voiceLoading ? "disabled" : ""}>
-              ${state.voiceLoading ? "Checking..." : "Refresh backend"}
-            </button>
-          </form>
-
           <div class="workflow-switch" role="tablist" aria-label="Prototype workflow">
             <button id="workflow-tts" class="${state.activeWorkflow === "tts" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "tts"}" aria-controls="workflow-panel" aria-label="Text to speech" data-testid="workflow-quick-tts-tab">Text to speech</button>
             <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" aria-controls="workflow-panel" aria-label="Video localization" data-testid="workflow-video-localization-tab">Video localization</button>
@@ -972,6 +1015,7 @@ function render() {
               ${accountBillingMarkup()}
               ${backendStatusMarkup(provider)}
               ${historyMarkup()}
+              ${diagnosticsMarkup()}
             </aside>
           </div>
         </section>
@@ -1053,6 +1097,7 @@ function ttsFormMarkup() {
   const voice = selectedVoice();
   const languages = voice.language_codes;
   const charCount = state.text.length;
+  const characterLimit = ttsCharacterLimit();
 
   return `
     <form id="synthesis-form" class="synthesis-form" aria-label="Synthesize speech">
@@ -1067,11 +1112,11 @@ function ttsFormMarkup() {
             <label><input type="radio" name="mode" value="text" ${state.mode === "text" ? "checked" : ""} /> Plain text</label>
             <label><input type="radio" name="mode" value="ssml" ${state.mode === "ssml" ? "checked" : ""} /> SSML</label>
           </div>
-          <span id="character-count">${charCount.toLocaleString()} / 5,000 characters</span>
+          <span id="character-count">${charCount.toLocaleString()} / ${characterLimit.toLocaleString()} characters</span>
         </div>
         <label class="field prompt-field transcript-stack">
           <span>${state.mode === "ssml" ? "SSML input" : "Script input"}</span>
-          <textarea id="text-input" maxlength="5000" rows="7">${escapeHtml(state.text)}</textarea>
+          <textarea id="text-input" maxlength="${characterLimit}" rows="7">${escapeHtml(state.text)}</textarea>
         </label>
         ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ""}
         <div class="action-row action-row-primary">
@@ -1107,6 +1152,7 @@ function ttsFormMarkup() {
 function videoFormMarkup() {
   const voices = vietnameseVoices();
   const selectedFile = state.videoFile;
+  const uploadLimitLabel = formatMegabytes(videoUploadLimitBytes());
 
   return `
     <form id="video-form" class="synthesis-form" aria-label="Localize video to Vietnamese">
@@ -1119,7 +1165,7 @@ function videoFormMarkup() {
         <span>Source video</span>
         <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/*" aria-label="Source video" aria-describedby="video-file-help" data-testid="video-file-input" />
         <strong>${selectedFile ? escapeHtml(selectedFile.name) : "Drop an English or Chinese video into the localization queue"}</strong>
-        <small id="video-file-help">${selectedFile ? `${formatNumber(selectedFile.size, " bytes")} selected. Start localization when ready.` : "MP4, MOV, M4V, or WebM up to 250 MB. Use short clips for the fastest acceptance pass."}</small>
+        <small id="video-file-help">${selectedFile ? `${formatNumber(selectedFile.size, " bytes")} selected. Start localization when ready.` : `MP4, MOV, M4V, or WebM up to ${uploadLimitLabel}. Use short clips for the fastest acceptance pass.`}</small>
       </label>
       <div class="control-grid video-controls">
         <label class="field"><span>Source language</span><select id="video-source-language">
@@ -1158,7 +1204,7 @@ function ttsOutputMarkup() {
           ? skeletonOutput()
           : state.latest
             ? outputMarkup()
-            : `<div class="empty-state"><p>No audio yet. Paste a script, choose a voice, and generate a preview to see playback, provider metadata, and download here.</p></div>`
+            : `<div class="empty-state output-preview"><div class="waveform-preview" aria-hidden="true">${waveformBars()}</div><p>No audio yet. Generate a preview to see the player, waveform package, provider metadata, and download here.</p></div>`
       }
     </section>
   `;
@@ -1169,6 +1215,7 @@ function outputMarkup() {
   const audioUrl = state.latestAudioUrl;
   return `
     <div class="audio-card">
+      <div class="waveform-preview is-live" aria-hidden="true">${waveformBars()}</div>
       ${audioUrl ? `<audio controls preload="metadata" src="${escapeAttribute(audioUrl)}">Your browser does not support audio playback.</audio><a class="download-link" href="${escapeAttribute(audioUrl)}" download>Download audio</a>` : `<div class="empty-state small"><p>The backend did not return an audio URL or path.</p></div>`}
       <dl class="metadata-list">
         <div><dt>Job ID</dt><dd data-testid="tts-job-id">${escapeHtml(latest.job_id)}</dd></div>
@@ -1234,8 +1281,8 @@ function videoOutputMarkup() {
 
 function backendStatusMarkup(provider?: { name?: string; ready?: boolean; fallback?: boolean }) {
   return `
-    <section class="panel-section compact proof-panel provider-readiness">
-      <div class="section-heading"><h2>Provider readiness</h2><button class="text-button" id="status-refresh" type="button">Check</button></div>
+    <details class="panel-section compact proof-panel provider-readiness secondary-details">
+      <summary><span>Provider readiness</span><button class="text-button" id="status-refresh" type="button">Check</button></summary>
       <dl class="metadata-list">
         <div><dt>Provider</dt><dd>${escapeHtml(provider?.name || "Fallback/demo")}${provider?.fallback ? " (fallback)" : ""}</dd></div>
         <div><dt>Auth</dt><dd>${escapeHtml(authModeLabel())}</dd></div>
@@ -1244,7 +1291,28 @@ function backendStatusMarkup(provider?: { name?: string; ready?: boolean; fallba
         <div><dt>Storage</dt><dd>${escapeHtml(state.readiness?.storage?.mode || "Unknown")} ${state.readiness?.storage?.ready === false ? "(not ready)" : ""}</dd></div>
         <div><dt>MLflow</dt><dd>${state.readiness?.mlflow?.configured ? "Configured" : "Not configured"} ${state.readiness?.mlflow?.ready === false ? "(not ready)" : ""}</dd></div>
       </dl>
-    </section>
+    </details>
+  `;
+}
+
+function diagnosticsMarkup() {
+  return `
+    <details class="panel-section compact diagnostics-panel">
+      <summary>Diagnostics and API connection</summary>
+      <form id="settings-form" class="settings-grid" aria-label="API connection settings">
+        <label class="field">
+          <span>Backend API URL</span>
+          <input id="base-url" type="url" value="${escapeHtml(state.baseUrl)}" autocomplete="url" />
+        </label>
+        <label class="field">
+          <span>Backend API key</span>
+          <input id="api-key" type="password" value="${escapeHtml(state.apiKey)}" autocomplete="off" placeholder="Session only; never stored" />
+        </label>
+        <button class="secondary-button" type="submit" ${state.voiceLoading ? "disabled" : ""}>
+          ${state.voiceLoading ? "Checking..." : "Refresh backend"}
+        </button>
+      </form>
+    </details>
   `;
 }
 
@@ -1254,16 +1322,17 @@ function accountBillingMarkup() {
   const planId = state.subscription?.plan_id || state.authUser?.plan_id || "No plan selected";
   const entitlementStatus = state.subscription?.entitlement_status || (state.subscription?.entitlements ? "Entitlements returned" : "No entitlement payload");
   return `
-    <section class="panel-section compact account-panel proof-panel" aria-label="Account and billing">
-      <div class="section-heading">
-        <h2>Auth and billing</h2>
-        <span>${escapeHtml(billingModeLabel())}</span>
-      </div>
+    <details class="panel-section compact account-panel proof-panel secondary-details" aria-label="Account and billing" ${email ? "open" : ""}>
+      <summary>
+        <span>Auth and billing</span>
+        <strong>${email ? "Signed in" : escapeHtml(billingModeLabel())}</strong>
+      </summary>
       ${
         email
           ? `<dl class="metadata-list">
               <div><dt>Signed in</dt><dd>${escapeHtml(email)}</dd></div>
               <div><dt>Identity</dt><dd>${escapeHtml(authModeLabel())}</dd></div>
+              <div><dt>Billing</dt><dd>${escapeHtml(billingModeLabel())}</dd></div>
               <div><dt>Plan</dt><dd>${escapeHtml(planId)}</dd></div>
               <div><dt>Subscription</dt><dd>${escapeHtml(subscriptionStatus)}</dd></div>
               <div><dt>Entitlements</dt><dd>${escapeHtml(entitlementStatus)}</dd></div>
@@ -1281,18 +1350,18 @@ function accountBillingMarkup() {
       }
       ${state.billingError ? `<div class="error-banner" role="alert">${escapeHtml(state.billingError)}</div>` : ""}
       ${state.billingMessage ? `<div class="success-banner" role="status">${escapeHtml(state.billingMessage)}</div>` : ""}
-    </section>
+    </details>
   `;
 }
 
 function historyMarkup() {
   const isVideo = state.activeWorkflow === "video";
   return `
-    <section class="panel-section compact artifact-exports">
-      <div class="section-heading">
-        <h2>${isVideo ? "Artifact exports" : "TTS history"}</h2>
+    <details class="panel-section compact artifact-exports secondary-details">
+      <summary>
+        <span>${isVideo ? "Artifact exports" : "TTS history"}</span>
         <button class="text-button" id="clear-history" type="button" ${isVideo ? (state.videoHistory.length ? "" : "disabled") : state.history.length ? "" : "disabled"}>Clear</button>
-      </div>
+      </summary>
       ${
         isVideo
           ? state.videoHistory.length
@@ -1302,7 +1371,7 @@ function historyMarkup() {
             ? `<ol class="history-list">${state.history.map(historyItem).join("")}</ol>`
             : `<div class="empty-state small"><p>No TTS jobs in this browser yet.</p></div>`
       }
-    </section>
+    </details>
   `;
 }
 
@@ -1312,6 +1381,10 @@ function rangeControl(id: string, label: string, value: number, min: number, max
 
 function skeletonOutput() {
   return `<div class="skeleton-block" aria-live="polite"><span></span><span></span><span></span></div>`;
+}
+
+function waveformBars() {
+  return Array.from({ length: 42 }, (_, index) => `<span style="--i: ${index}"></span>`).join("");
 }
 
 function downloadButton(label: string, href: string) {
@@ -1514,7 +1587,7 @@ function bindEvents() {
   document.querySelector<HTMLTextAreaElement>("#text-input")?.addEventListener("input", (event) => {
     state.text = (event.target as HTMLTextAreaElement).value;
     const count = document.querySelector<HTMLElement>("#character-count");
-    if (count) count.textContent = `${state.text.length.toLocaleString()} / 5,000 characters`;
+    if (count) count.textContent = `${state.text.length.toLocaleString()} / ${ttsCharacterLimit().toLocaleString()} characters`;
   });
   document.querySelector<HTMLSelectElement>("#voice-select")?.addEventListener("change", (event) => {
     state.selectedVoiceName = (event.target as HTMLSelectElement).value;

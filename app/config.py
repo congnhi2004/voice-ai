@@ -4,6 +4,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+OPENAI_TTS_INPUT_MAX_CHARS = 4096
+OPENAI_AUDIO_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024
+LOCAL_DEV_JWT_SECRET = "local-dev-only-change-auth-jwt-secret-before-production"
+
 
 def _split_csv(value: str | None) -> list[str]:
     if not value:
@@ -75,12 +79,21 @@ class Settings:
         if self.auth_jwt_secret:
             return self.auth_jwt_secret
         if not self.production_like:
-            return "local-dev-only-change-auth-jwt-secret-before-production"
+            return LOCAL_DEV_JWT_SECRET
         return None
 
     @property
     def auth_configured(self) -> bool:
         return bool(self.jwt_secret)
+
+    @property
+    def production_identity_configured(self) -> bool:
+        return bool(self.production_like and self.auth_jwt_secret and self.auth_jwt_secret != LOCAL_DEV_JWT_SECRET)
+
+    def tts_input_max_chars_for_provider(self, provider_name: str) -> int:
+        if provider_name == "openai":
+            return min(self.max_input_chars, OPENAI_TTS_INPUT_MAX_CHARS)
+        return self.max_input_chars
 
     @property
     def stripe_configured(self) -> bool:

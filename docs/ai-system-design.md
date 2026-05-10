@@ -7,10 +7,11 @@ Voice AI is a FastAPI application with a provider abstraction around video local
 Core components:
 
 - API layer: request validation, authentication, CORS, response contracts.
-- Job orchestration layer: asynchronous localization jobs, stage state, retries, and artifact manifests.
-- Transcription provider layer: Google Speech-to-Text for English/Chinese audio.
-- Translation provider layer: Google Cloud Translation for Vietnamese text output.
-- TTS provider layer: Google provider for production; local deterministic provider for dev and CI.
+- Current public video endpoint: synchronous multipart localization for short prototype videos at `POST /v1/video-localization/jobs`.
+- Target job orchestration layer: asynchronous localization jobs, stage state, retries, and artifact manifests.
+- Transcription provider layer: OpenAI in the current public prototype; Google Speech-to-Text remains a target option for English/Chinese audio in production async mode.
+- Translation provider layer: OpenAI in the current public prototype; Google Cloud Translation remains a target option for Vietnamese text output.
+- TTS provider layer: OpenAI in the current public prototype; Google provider is a target production option; local deterministic provider remains for dev and CI.
 - Media processing layer: FFmpeg for extracting audio, creating subtitle outputs, muxing/replacing audio, and rendering MP4.
 - Artifact storage layer: local filesystem in development; Cloud Storage or compatible durable object storage in production.
 - Observability layer: structured logs, metrics, MLflow Tracking runs, and health/readiness checks.
@@ -24,24 +25,38 @@ Core components:
 2. API validates auth, request size, input mode, voice config, and audio config.
 3. Service creates `job_id` and starts timing.
 4. TTS provider synthesizes audio.
-5. Google provider sends a synchronous request to `POST https://texttospeech.googleapis.com/v1/text:synthesize`.
-6. Google response returns `audioContent` as base64 audio data.
+5. The active provider sends a synchronous TTS request. Current public runtime uses OpenAI `gpt-4o-mini-tts`; Google target mode uses `POST https://texttospeech.googleapis.com/v1/text:synthesize`.
+6. Provider response returns audio bytes or encoded audio content.
 7. Service decodes audio, stores it, estimates or records duration, and returns JSON metadata.
 8. Service logs metrics and parameters to MLflow.
 
-### Video Localization Flow
+### Current Public Video Localization Flow
 
-1. Client uploads a Chinese or English video through `POST /v1/videos`.
-2. Service validates auth, content type, file size, duration if available, and stores the source artifact.
-3. Client creates a localization job through `POST /v1/localization-jobs`.
-4. Job worker extracts source audio with FFmpeg.
-5. Transcription provider runs Google Speech-to-Text asynchronous or long-audio recognition and returns timestamped segments.
+1. Client uploads a Chinese or English video through `POST /v1/video-localization/jobs` as multipart form data.
+2. Service validates auth, content type, current provider file-size limits, source language, and target language.
+3. Service creates a job id, stores the source artifact locally, and processes the short video inline during the HTTP request.
+4. FFmpeg extracts source audio.
+5. Current public provider path uses OpenAI transcription and translation for supported short files.
+6. Subtitle builder writes Vietnamese SRT and VTT files.
+7. TTS provider synthesizes Vietnamese voice/dub audio from the Vietnamese script.
+8. Renderer uses FFmpeg to create the final MP4 with Vietnamese subtitles and Vietnamese audio according to the current render mode.
+9. Response returns the completed job payload with transcript segments, artifact URLs, checksums, provider metadata, latency, and MLflow run id when tracking succeeds.
+
+This flow is a prototype implementation. It can prove product value for short samples, but it should not be presented as the production worker architecture.
+
+### Target Production Video Localization Flow
+
+1. Client uploads source media to an authenticated upload endpoint or signed object-storage URL.
+2. Service validates source metadata, stores the source in durable object storage, creates a job record, and returns `202 queued` within the request lifetime.
+3. Cloud Tasks, Cloud Run Jobs, Pub/Sub, or an equivalent worker dispatches the job.
+4. Worker extracts source audio with FFmpeg.
+5. Transcription provider runs a provider path appropriate for the source language, duration, and file size. Google Speech-to-Text asynchronous or long-audio recognition is the preferred Google path for English/Chinese if Google is selected.
 6. Translation provider translates source segments into Vietnamese.
 7. Subtitle builder writes Vietnamese SRT and VTT files.
-8. TTS provider synthesizes Vietnamese voice/dub audio from the Vietnamese script.
-9. Renderer uses FFmpeg to create the final MP4 with Vietnamese subtitles and Vietnamese audio according to the requested render mode.
-10. Artifact manifest stores transcript/script, subtitles, audio, final MP4, checksums, durations, provider metadata, and download URLs.
-11. Service logs stage metrics, provider metrics, and artifact references to MLflow.
+8. TTS provider synthesizes Vietnamese voice/dub audio from the Vietnamese script, chunking where provider character limits require it.
+9. Renderer uses FFmpeg to create the final MP4.
+10. Artifact manifest stores transcript/script, subtitles, audio, final MP4, checksums, durations, provider metadata, and signed or authenticated download URLs.
+11. Service logs stage metrics, provider metrics, and artifact references to MLflow or the approved observability store.
 
 ## Provider Contract
 
@@ -59,6 +74,8 @@ Google provider maps local request fields to:
 - Optional advanced voice options where supported
 
 The official Google endpoint requires input, voice, and audioConfig, and returns base64 audio content.
+
+OpenAI provider mode must enforce current OpenAI limits before calling the provider: TTS input is limited to 4096 characters per request, and speech-to-text file uploads are limited to 25 MB unless the service implements chunking or a different large-file path.
 
 Transcription providers should expose:
 
@@ -78,7 +95,7 @@ Media processing should expose:
 - `render_video(video_uri, subtitle_uri, dub_audio_uri, render_mode) -> mp4_uri`
 - `probe_media(uri) -> MediaMetadata`
 
-Current-source decision: prefer Google Speech-to-Text over Video Intelligence speech transcription for this MVP because Video Intelligence speech transcription is English-only for that feature, while Speech-to-Text supports English and Chinese coverage.
+Current-source decision: prefer Google Speech-to-Text over Video Intelligence speech transcription for the target Google-backed production path because Video Intelligence speech transcription is English-only for that feature, while Speech-to-Text supports English and Chinese coverage. The current public prototype uses OpenAI instead.
 
 ## Local Fallback
 
@@ -92,6 +109,7 @@ Required behavior:
 - Accept a fixture video upload and generate deterministic Vietnamese transcript/script, SRT, VTT, audio, and MP4 artifacts.
 - Preserve the same localization job/status/artifact response shapes as cloud-backed localization.
 - Mark metadata with `provider: "local"` and `fallback: true`.
+- Do not present beep/tone fallback output as real Voice AI quality in public prototype evidence.
 
 ## Storage
 
@@ -107,6 +125,7 @@ Production:
 - Do not rely on Cloud Run local filesystem for durable files.
 - Store source videos, extracted audio, transcripts, subtitles, TTS audio, and rendered videos in Cloud Storage.
 - Return signed URLs, authenticated media URLs, or CDN-backed public URLs depending on product policy.
+- Run long video processing outside the public request thread through a durable worker model.
 
 ## Failure Modes
 

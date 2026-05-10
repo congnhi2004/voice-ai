@@ -1,0 +1,14 @@
+
+> voice-ai-frontend@0.1.0 test
+> vitest run src/__tests__
+
+
+ RUN  v3.2.4 /home/jhao/code/voice-ai/frontend
+
+ ✓ src/__tests__/api.test.ts (4 tests) 4ms
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  17:29:18
+   Duration  618ms (transform 105ms, setup 0ms, collect 100ms, tests 4ms, environment 0ms, prepare 121ms)
+

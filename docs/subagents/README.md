@@ -23,7 +23,11 @@ Thư mục này lưu báo cáo làm việc của các subagent và bằng chứn
 - [QA Public Runtime Acceptance - 2026-05-10](qa-public-runtime-20260510.md)
 - [Release Runtime Gate - 2026-05-10](release-runtime-gate-20260510.md)
 - [Completion Audit - 2026-05-10](completion-audit-20260510.md)
+- [Completion QA Acceptance Audit - 2026-05-10](completion-qa-audit-20260510.md)
+- [PM Artifact Completion Audit - 2026-05-10](pm-artifact-completion-audit-20260510.md)
+- [Infra Production Completion Audit - 2026-05-10](infra-production-completion-audit-20260510.md)
 - [Tech Lead Runtime Review - 2026-05-10](techlead-runtime-review-20260510.md)
+- [Tech Lead Release Review - 2026-05-10](techlead-release-review-20260510.md)
 - [Skill Author A Report](skill-author-a-report.md)
 - [Skill Author B Report](skill-author-b-report.md)
 
@@ -34,6 +38,7 @@ Thư mục này lưu báo cáo làm việc của các subagent và bằng chứn
 - [evidence/audio](evidence/audio/) - file WAV từ TTS và video localization.
 - [evidence/video](evidence/video/) - MP4 nguồn/kết quả và phụ đề SRT/VTT.
 - [evidence/api](evidence/api/) - response TXT/JSON, browser-check JSON, bundle JS dùng làm bằng chứng.
+- [evidence/qa-audit-20260510](evidence/qa-audit-20260510/) - bằng chứng audit hoàn tất mới nhất: health/readiness, OpenAI TTS, video tiếng Anh/Trung, auth, billing disabled, MLflow nội bộ, test output và deploy blocker.
 
 ## Quy ước từ giờ trở đi
 

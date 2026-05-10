@@ -1,0 +1,7 @@
+## main...origin/main [ahead 8]
+ M docs/subagents/evidence/images/frontend-premium-tts-desktop.png
+ M docs/subagents/evidence/images/frontend-premium-video-desktop.png
+?? docs/subagents/evidence/qa-audit-20260510/
+?? docs/subagents/infra-production-completion-audit-20260510.md
+?? docs/subagents/pm-artifact-completion-audit-20260510.md
+?? docs/subagents/techlead-release-review-20260510.md

@@ -35,6 +35,13 @@ export type ProductCapabilities = {
     active_provider?: string;
     encodings?: string[];
     local_fallback?: boolean;
+    max_input_chars?: number;
+    max_input_characters?: number;
+    limits?: {
+      max_input_chars?: number;
+      max_input_characters?: number;
+      max_text_chars?: number;
+    };
   };
   video_localization?: {
     available?: boolean;
@@ -43,6 +50,16 @@ export type ProductCapabilities = {
     demo_mode?: boolean;
     artifacts?: string[];
     ffmpeg_available?: boolean;
+    max_upload_bytes?: number;
+    max_file_size_bytes?: number;
+    max_upload_mb?: number;
+    max_file_size_mb?: number;
+    limits?: {
+      max_upload_bytes?: number;
+      max_file_size_bytes?: number;
+      max_upload_mb?: number;
+      max_file_size_mb?: number;
+    };
   };
   auth?: {
     available?: boolean;
@@ -407,7 +424,7 @@ export class VoiceAiClient {
   }
 
   async createCheckoutSession(planId: string) {
-    return this.request<CheckoutSessionResponse>("/v1/billing/checkout", true, {
+    return this.request<CheckoutSessionResponse>("/v1/billing/checkout-session", true, {
       method: "POST",
       body: JSON.stringify({
         plan_id: planId,
@@ -418,7 +435,7 @@ export class VoiceAiClient {
   }
 
   async createBillingPortalSession() {
-    return this.request<BillingPortalResponse>("/v1/billing/portal", true, {
+    return this.request<BillingPortalResponse>("/v1/billing/customer-portal", true, {
       method: "POST",
       body: JSON.stringify({
         return_url: `${window.location.origin}${window.location.pathname}?billing=returned`

@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+date: Sun, 10 May 2026 10:26:12 GMT
+server: uvicorn
+content-type: audio/x-wav
+accept-ranges: bytes
+content-length: 348044
+last-modified: Sun, 10 May 2026 10:26:03 GMT
+etag: "225575d823fc7eb99b6057ff0a8643f2"
+x-request-id: req_49edcce36c7941e0a87430ab16a425e0
+

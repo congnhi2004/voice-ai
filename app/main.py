@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -67,7 +68,7 @@ def problem(code: str, message: str, request_id: str, status_code: int, details:
     body = {"error": {"code": code, "message": message, "details": details or {}}, "request_id": request_id}
     if job_id:
         body["job_id"] = job_id
-    return JSONResponse(status_code=status_code, content=body)
+    return JSONResponse(status_code=status_code, content=jsonable_encoder(body, custom_encoder={Exception: str}))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -243,6 +244,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def billing_subscription(user=Depends(current_user)):
         return user.subscription()
 
+    @app.post("/v1/billing/checkout", response_model=BillingSessionResponse)
     @app.post("/v1/billing/checkout-session", response_model=BillingSessionResponse)
     async def create_checkout_session(payload: CheckoutSessionRequest, user=Depends(current_user)):
         try:
@@ -254,6 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             code = str(exc) or "billing_error"
             return problem(code, "Requested plan cannot be billed.", request_id_var.get(), 400)
 
+    @app.post("/v1/billing/portal", response_model=BillingSessionResponse)
     @app.post("/v1/billing/customer-portal", response_model=BillingSessionResponse)
     async def create_customer_portal(user=Depends(current_user)):
         try:
@@ -318,8 +321,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/v1/synthesize", response_model=SynthesizeResponse, dependencies=[Depends(require_api_key)])
     async def synthesize(payload: SynthesizeRequest, response: Response, idempotency_key: str | None = Header(default=None)):
         input_chars = len(payload.input_text)
-        if input_chars > settings.max_input_chars:
-            return problem("input_too_large", "Input exceeds MAX_INPUT_CHARS.", request_id_var.get(), 413, {"max_input_chars": settings.max_input_chars})
+        effective_max_input_chars = settings.tts_input_max_chars_for_provider(provider.name)
+        if input_chars > effective_max_input_chars:
+            return problem(
+                "input_too_large",
+                "Input exceeds the active text-to-speech provider limit.",
+                request_id_var.get(),
+                413,
+                {
+                    "provider": provider.name,
+                    "max_input_chars": effective_max_input_chars,
+                    "configured_max_input_chars": settings.max_input_chars,
+                },
+            )
 
         job_id = f"tts_{uuid.uuid4().hex}"
         response.headers["X-Job-ID"] = job_id
@@ -439,7 +453,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 str(exc),
                 request_id_var.get(),
                 400,
-                {"filename": file.filename, "content_type": file.content_type, "max_bytes": OPENAI_AUDIO_UPLOAD_LIMIT_BYTES},
+                {"filename": file.filename, "content_type": file.content_type, "max_upload_bytes": OPENAI_AUDIO_UPLOAD_LIMIT_BYTES},
                 job_id=job_id,
             )
         try:

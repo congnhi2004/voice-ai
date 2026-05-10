@@ -1,0 +1,29 @@
+
+> voice-ai-frontend@0.1.0 test:e2e
+> playwright test --reporter=line
+
+
+
+Running 12 tests using 2 workers
+
+
+
+
+
+
+
+
+
+[1A[2K[1/12] [desktop] › src/e2e/app.spec.ts:84:1 › TTS flow renders output and captures desktop evidence
+[1A[2K[2/12] [mobile] › src/e2e/app.spec.ts:84:1 › TTS flow renders output and captures desktop evidence
+[1A[2K[3/12] [mobile] › src/e2e/app.spec.ts:116:1 › video localization flow renders mocked progress, previews, and mobile evidence
+[1A[2K[4/12] [mobile] › src/e2e/app.spec.ts:213:1 › Video localization tab exposes the upload workflow
+[1A[2K[5/12] [desktop] › src/e2e/app.spec.ts:116:1 › video localization flow renders mocked progress, previews, and mobile evidence
+[1A[2K[6/12] [mobile] › src/e2e/app.spec.ts:230:1 › video upload validation blocks unsupported files before hitting backend
+[1A[2K[7/12] [mobile] › src/e2e/app.spec.ts:251:1 › auth and billing panel expose session state with billing disabled
+[1A[2K[8/12] [mobile] › src/e2e/app.spec.ts:286:1 › pricing selection calls checkout when billing capability is enabled
+[1A[2K[9/12] [desktop] › src/e2e/app.spec.ts:213:1 › Video localization tab exposes the upload workflow
+[1A[2K[10/12] [desktop] › src/e2e/app.spec.ts:230:1 › video upload validation blocks unsupported files before hitting backend
+[1A[2K[11/12] [desktop] › src/e2e/app.spec.ts:251:1 › auth and billing panel expose session state with billing disabled
+[1A[2K[12/12] [desktop] › src/e2e/app.spec.ts:286:1 › pricing selection calls checkout when billing capability is enabled
+[1A[2K  12 passed (15.6s)

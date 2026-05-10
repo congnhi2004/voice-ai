@@ -437,6 +437,10 @@ class BillingService:
         obj = event_dict.get("data", {}).get("object", {})
         if event_type == "checkout.session.completed":
             self._provision_from_checkout_session(obj)
+        elif event_type == "invoice.paid":
+            self._provision_from_invoice(obj, status="active")
+        elif event_type == "invoice.payment_failed":
+            self._provision_from_invoice(obj, status="past_due")
         elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
             self._provision_from_subscription(obj)
         return {"received": True, "duplicate": False, "event_type": event_type}
@@ -445,9 +449,33 @@ class BillingService:
         customer_id = _as_id(session.get("customer"))
         subscription_id = _as_id(session.get("subscription"))
         metadata = session.get("metadata") or {}
-        plan_id = metadata.get("plan_id") or "starter"
-        if customer_id:
-            self.store.update_subscription(customer_id=customer_id, subscription_id=subscription_id, status="active", plan_id=plan_id)
+        plan_id = metadata.get("plan_id") or _plan_from_line_items(self.settings, session.get("line_items", {}))
+        checkout_status = session.get("status")
+        payment_status = session.get("payment_status")
+        subscription_status = _object_status(session.get("subscription"))
+        invoice_status = _object_status(session.get("invoice"))
+        payment_settled = payment_status in {"paid", "no_payment_required"} or invoice_status == "paid"
+        subscription_ready = subscription_status in ACTIVE_SUBSCRIPTION_STATUSES
+        if customer_id and plan_id and (payment_settled or subscription_ready) and checkout_status in {None, "complete"}:
+            self.store.update_subscription(
+                customer_id=customer_id,
+                subscription_id=subscription_id,
+                status=subscription_status if subscription_ready else "active",
+                plan_id=plan_id,
+            )
+
+    def _provision_from_invoice(self, invoice: dict[str, Any], *, status: str) -> None:
+        customer_id = _as_id(invoice.get("customer"))
+        if not customer_id:
+            return
+        existing = self.store.get_user_by_stripe_customer(customer_id)
+        parent = invoice.get("parent") if isinstance(invoice.get("parent"), dict) else {}
+        subscription_details = parent.get("subscription_details", {}) if isinstance(parent.get("subscription_details"), dict) else {}
+        subscription_id = _as_id(invoice.get("subscription")) or _as_id(subscription_details.get("subscription"))
+        metadata = invoice.get("metadata") or {}
+        plan_id = metadata.get("plan_id") or _plan_from_invoice_lines(self.settings, invoice) or (existing.plan_id if existing else None)
+        if plan_id:
+            self.store.update_subscription(customer_id=customer_id, subscription_id=subscription_id, status=status, plan_id=plan_id)
 
     def _provision_from_subscription(self, subscription: dict[str, Any]) -> None:
         customer_id = _as_id(subscription.get("customer"))
@@ -468,14 +496,54 @@ def _as_id(value: Any) -> str | None:
     return None
 
 
+def _object_status(value: Any) -> str | None:
+    if isinstance(value, dict):
+        status = value.get("status")
+        return status if isinstance(status, str) else None
+    return None
+
+
+def _price_id_from_line(line: dict[str, Any]) -> str | None:
+    price = line.get("price")
+    if isinstance(price, dict):
+        candidate = price.get("id")
+        if isinstance(candidate, str):
+            return candidate
+    plan = line.get("plan")
+    if isinstance(plan, dict):
+        candidate = plan.get("id")
+        if isinstance(candidate, str):
+            return candidate
+    pricing = line.get("pricing")
+    if isinstance(pricing, dict):
+        price_details = pricing.get("price_details") or {}
+        candidate = price_details.get("price")
+        if isinstance(candidate, str):
+            return candidate
+    return None
+
+
+def _plan_from_line_items(settings: Settings, line_items: dict[str, Any]) -> str | None:
+    return _plan_from_lines(settings, line_items.get("data", []) if isinstance(line_items, dict) else [])
+
+
 def _plan_from_subscription_items(settings: Settings, subscription: dict[str, Any]) -> str | None:
     items = subscription.get("items", {}).get("data", [])
+    return _plan_from_lines(settings, items)
+
+
+def _plan_from_invoice_lines(settings: Settings, invoice: dict[str, Any]) -> str | None:
+    lines = invoice.get("lines", {}).get("data", [])
+    return _plan_from_lines(settings, lines)
+
+
+def _plan_from_lines(settings: Settings, lines: list[dict[str, Any]]) -> str | None:
     price_ids = {
         settings.stripe_price_starter: "starter",
         settings.stripe_price_pro: "pro",
     }
-    for item in items:
-        price_id = _as_id((item.get("price") or {}).get("id"))
+    for item in lines:
+        price_id = _price_id_from_line(item)
         if price_id in price_ids:
             return price_ids[price_id]
     return None

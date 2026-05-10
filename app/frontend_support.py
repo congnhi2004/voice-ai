@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .auth_billing import available_plans
-from .config import Settings
+from .config import OPENAI_AUDIO_UPLOAD_LIMIT_BYTES, Settings
 from .models import (
     CapabilitiesResponse,
     DemoWorkspaceStatus,
@@ -14,6 +14,7 @@ def pricing_plans(settings: Settings) -> list[PricingPlan]:
 
 
 def capabilities(settings: Settings, *, provider_name: str, ffmpeg_available: bool) -> CapabilitiesResponse:
+    effective_tts_max_chars = settings.tts_input_max_chars_for_provider(provider_name)
     return CapabilitiesResponse(
         service=settings.service_name,
         environment=settings.environment,
@@ -24,6 +25,8 @@ def capabilities(settings: Settings, *, provider_name: str, ffmpeg_available: bo
             "active_provider": provider_name,
             "encodings": ["MP3", "LINEAR16", "OGG_OPUS"],
             "local_fallback": True,
+            "max_input_chars": effective_tts_max_chars,
+            "configured_max_input_chars": settings.max_input_chars,
         },
         video_localization={
             "available": True,
@@ -32,11 +35,15 @@ def capabilities(settings: Settings, *, provider_name: str, ffmpeg_available: bo
             "demo_mode": settings.localization_provider == "local",
             "artifacts": ["source_video", "transcript", "subtitles_srt", "subtitles_vtt", "voiceover_audio", "localized_video"],
             "ffmpeg_available": ffmpeg_available,
+            "max_upload_bytes": OPENAI_AUDIO_UPLOAD_LIMIT_BYTES,
+            "max_upload_mb": OPENAI_AUDIO_UPLOAD_LIMIT_BYTES // (1024 * 1024),
+            "upload_limit_source": "openai-audio-upload",
         },
         auth={
             "available": True,
             "mode": "jwt-password",
-            "production_identity": settings.auth_configured,
+            "configured": settings.auth_configured,
+            "production_identity": settings.production_identity_configured,
             "storage": "sqlite",
         },
         billing={

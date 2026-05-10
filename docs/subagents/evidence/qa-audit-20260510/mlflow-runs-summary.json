@@ -1,0 +1,80 @@
+{
+  "tts": {
+    "run_id": "39faf7e1228045279c61b2327e3a71bb",
+    "experiment_id": "1",
+    "status": "FINISHED",
+    "tags": {
+      "job_id": "tts_5c33346a5bdc4e4bb4af05a94f69556d",
+      "request_id": "req_d1e142a610c3469faa58dad2eac9cbf8",
+      "provider": "openai",
+      "environment": "local",
+      "fallback": "false"
+    },
+    "params": {
+      "voice_name": "marin",
+      "language_code": "vi-VN",
+      "audio_encoding": "LINEAR16",
+      "input_type": "text",
+      "input_chars": "89"
+    },
+    "metrics": {
+      "latency_ms": 1686.0,
+      "provider_latency_ms": 1684.0,
+      "audio_bytes": 348044.0,
+      "input_chars": 89.0,
+      "success": 1.0
+    }
+  },
+  "video_english": {
+    "run_id": "568f8bee63c44aed97ec4e325b161bab",
+    "experiment_id": "1",
+    "status": "FINISHED",
+    "tags": {
+      "job_id": "vid_5f5d6bde54404efbb05375c1fdc80d32",
+      "request_id": "req_aeb4dc2b13ed42b68e6f16ba1672f79e",
+      "provider": "video-openai",
+      "environment": "local",
+      "fallback": "false"
+    },
+    "params": {
+      "voice_name": "marin",
+      "language_code": "vi-VN",
+      "audio_encoding": "LINEAR16",
+      "input_type": "video",
+      "input_chars": "112"
+    },
+    "metrics": {
+      "latency_ms": 6400.0,
+      "provider_latency_ms": 6400.0,
+      "audio_bytes": 360044.0,
+      "input_chars": 112.0,
+      "success": 1.0
+    }
+  },
+  "video_chinese": {
+    "run_id": "b8872a7f4cbe483d8fc22497c783a197",
+    "experiment_id": "1",
+    "status": "FINISHED",
+    "tags": {
+      "job_id": "vid_1c46114949044282a37605b9d070abbc",
+      "request_id": "req_3918e5fa47ca4ed4b46f76b9ce008f4e",
+      "provider": "video-openai",
+      "environment": "local",
+      "fallback": "false"
+    },
+    "params": {
+      "voice_name": "marin",
+      "language_code": "vi-VN",
+      "audio_encoding": "LINEAR16",
+      "input_type": "video",
+      "input_chars": "99"
+    },
+    "metrics": {
+      "latency_ms": 4993.0,
+      "provider_latency_ms": 4993.0,
+      "audio_bytes": 273644.0,
+      "input_chars": 99.0,
+      "success": 1.0
+    }
+  }
+}

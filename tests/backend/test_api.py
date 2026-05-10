@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import Settings
+from app.config import OPENAI_AUDIO_UPLOAD_LIMIT_BYTES, OPENAI_TTS_INPUT_MAX_CHARS, Settings
 from app.main import create_app
 from app.providers import LocalFallbackProvider, OpenAITTSProvider, build_provider
 from app.video_localization import OpenAIVideoLocalizationProvider
@@ -410,6 +410,23 @@ def test_max_input_chars_returns_contract_error(tmp_path: Path):
     assert body["request_id"].startswith("req_")
 
 
+def test_malformed_synthesize_input_returns_structured_validation_error(tmp_path: Path):
+    client = make_client(tmp_path)
+    payload = synth_payload("Hello")
+    payload["ssml"] = "<speak>Hello</speak>"
+
+    response = client.post("/v1/synthesize", json=payload, headers={"X-Request-ID": "req_validation"})
+
+    assert response.status_code == 422
+    assert response.headers["X-Request-ID"] == "req_validation"
+    body = response.json()
+    assert body["error"]["code"] == "validation_error"
+    assert body["request_id"] == "req_validation"
+    errors = body["error"]["details"]["errors"]
+    assert errors[0]["type"] == "value_error"
+    assert errors[0]["ctx"]["error"] == "Exactly one of text or ssml is required."
+
+
 def test_google_required_credentials_readiness_failure(tmp_path: Path):
     client = make_client(tmp_path, tts_provider="google", google_application_credentials=None)
 
@@ -548,6 +565,26 @@ def test_openai_provider_errors_redact_configured_secret(tmp_path: Path, monkeyp
     assert secret not in response.text
     assert "[redacted]" in response.text
     assert secret not in caplog.text
+
+
+def test_openai_tts_rejects_input_over_provider_limit_before_provider_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    speech = FakeSpeech(content=b"RIFFshould-not-be-called")
+    monkeypatch.setattr(OpenAITTSProvider, "_get_client", lambda self: FakeOpenAIClient(speech))
+    client = make_client(tmp_path, tts_provider="openai", openai_api_key="dummy_openai_tts", max_input_chars=5000)
+
+    response = client.post("/v1/synthesize", json=vi_synth_payload("x" * (OPENAI_TTS_INPUT_MAX_CHARS + 1)))
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "input_too_large"
+    assert body["error"]["details"]["provider"] == "openai"
+    assert body["error"]["details"]["max_input_chars"] == OPENAI_TTS_INPUT_MAX_CHARS
+    assert body["error"]["details"]["configured_max_input_chars"] == 5000
+    assert speech.calls == []
+
+    capabilities = client.get("/v1/product/capabilities").json()
+    assert capabilities["tts"]["active_provider"] == "openai"
+    assert capabilities["tts"]["max_input_chars"] == OPENAI_TTS_INPUT_MAX_CHARS
 
 
 def test_video_localization_demo_workflow_creates_artifacts_and_status(tmp_path: Path, valid_mp4_bytes: bytes, fake_espeak_ng: list[list[str]]):
@@ -723,6 +760,7 @@ def test_video_localization_rejects_oversized_upload_before_provider(tmp_path: P
     body = response.json()
     assert body["error"]["code"] == "unsupported_video_upload"
     assert "25 MB" in body["error"]["message"]
+    assert body["error"]["details"]["max_upload_bytes"] == OPENAI_AUDIO_UPLOAD_LIMIT_BYTES
 
 
 def test_public_video_artifact_urls_do_not_use_audio_prefix(tmp_path: Path, valid_mp4_bytes: bytes, fake_espeak_ng: list[list[str]]):
@@ -791,7 +829,9 @@ def test_openapi_includes_tts_and_video_paths(tmp_path: Path):
     assert "/v1/product/capabilities" in schema["paths"]
     assert "/v1/demo/workspace" in schema["paths"]
     assert "/v1/billing/checkout-session" in schema["paths"]
+    assert "/v1/billing/checkout" in schema["paths"]
     assert "/v1/billing/customer-portal" in schema["paths"]
+    assert "/v1/billing/portal" in schema["paths"]
     assert "/v1/billing/stripe-webhook" in schema["paths"]
 
 
@@ -810,8 +850,12 @@ def test_public_product_and_demo_workspace_endpoints(tmp_path: Path):
     assert capabilities.status_code == 200
     capabilities_body = capabilities.json()
     assert capabilities_body["tts"]["available"] is True
+    assert capabilities_body["tts"]["max_input_chars"] == 5000
+    assert capabilities_body["video_localization"]["max_upload_bytes"] == OPENAI_AUDIO_UPLOAD_LIMIT_BYTES
     assert capabilities_body["video_localization"]["target_languages"] == ["vi", "vi-VN"]
     assert capabilities_body["auth"]["mode"] == "jwt-password"
+    assert capabilities_body["auth"]["configured"] is True
+    assert capabilities_body["auth"]["production_identity"] is False
     assert capabilities_body["billing"]["production_billing"] is False
 
     workspace = client.get("/v1/demo/workspace")
@@ -880,6 +924,10 @@ def test_billing_checkout_not_configured_returns_503(tmp_path: Path):
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "billing_not_configured"
 
+    alias = client.post("/v1/billing/checkout", json={"plan_id": "starter"}, headers={"Authorization": f"Bearer {token}"})
+    assert alias.status_code == 503
+    assert alias.json()["error"]["code"] == "billing_not_configured"
+
 
 def test_billing_checkout_and_portal_use_mocked_stripe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     class FakeStripeBillingClient:
@@ -918,9 +966,17 @@ def test_billing_checkout_and_portal_use_mocked_stripe(tmp_path: Path, monkeypat
     assert checkout.status_code == 200
     assert checkout.json() == {"url": "https://checkout.stripe.test/session", "session_id": "cs_test_123"}
 
+    checkout_alias = client.post("/v1/billing/checkout", json={"plan_id": "starter"}, headers={"Authorization": f"Bearer {token}"})
+    assert checkout_alias.status_code == 200
+    assert checkout_alias.json() == {"url": "https://checkout.stripe.test/session", "session_id": "cs_test_123"}
+
     portal = client.post("/v1/billing/customer-portal", headers={"Authorization": f"Bearer {token}"})
     assert portal.status_code == 200
     assert portal.json() == {"url": "https://billing.stripe.test/session", "session_id": "bps_test_123"}
+
+    portal_alias = client.post("/v1/billing/portal", headers={"Authorization": f"Bearer {token}"})
+    assert portal_alias.status_code == 200
+    assert portal_alias.json() == {"url": "https://billing.stripe.test/session", "session_id": "bps_test_123"}
 
 
 def test_stripe_webhook_verifies_signature_and_provisions_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -938,6 +994,8 @@ def test_stripe_webhook_verifies_signature_and_provisions_subscription(tmp_path:
                     "object": {
                         "customer": "cus_test_123",
                         "subscription": "sub_test_123",
+                        "status": "complete",
+                        "payment_status": "paid",
                         "metadata": {"plan_id": "starter"},
                     }
                 },
@@ -964,4 +1022,89 @@ def test_stripe_webhook_verifies_signature_and_provisions_subscription(tmp_path:
     subscription = client.get("/v1/billing/subscription", headers={"Authorization": f"Bearer {token}"})
     assert subscription.status_code == 200
     assert subscription.json()["plan_id"] == "starter"
+    assert subscription.json()["subscription_status"] == "active"
+
+
+def test_stripe_checkout_completed_does_not_activate_unpaid_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeStripeBillingClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def construct_event(self, *, payload: bytes, signature: str):
+            return {
+                "id": "evt_unpaid_checkout",
+                "type": "checkout.session.completed",
+                "data": {
+                    "object": {
+                        "customer": "cus_unpaid_123",
+                        "subscription": "sub_unpaid_123",
+                        "status": "complete",
+                        "payment_status": "unpaid",
+                        "metadata": {"plan_id": "starter"},
+                    }
+                },
+            }
+
+    monkeypatch.setattr("app.main.StripeBillingClient", FakeStripeBillingClient)
+    client = make_client(
+        tmp_path,
+        stripe_secret_key="sk_test_mock",
+        stripe_webhook_secret="whsec_mock",
+        stripe_success_url="https://example.com/success",
+        stripe_cancel_url="https://example.com/cancel",
+        stripe_portal_return_url="https://example.com/account",
+        stripe_price_starter="price_starter",
+    )
+    token = client.post("/v1/auth/register", json={"email": "unpaid@example.com", "password": "billing-pass-123"}).json()["access_token"]
+    user = client.app.state.auth_service.user_from_token(token)
+    client.app.state.auth_store.set_stripe_customer(user.id, "cus_unpaid_123")
+
+    response = client.post("/v1/billing/stripe-webhook", content=b"{}", headers={"Stripe-Signature": "t=123,v1=abc"})
+
+    assert response.status_code == 200
+    subscription = client.get("/v1/billing/subscription", headers={"Authorization": f"Bearer {token}"})
+    assert subscription.status_code == 200
+    assert subscription.json()["plan_id"] == "free"
+    assert subscription.json()["subscription_status"] == "none"
+
+
+def test_stripe_invoice_paid_provisions_subscription_from_price_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeStripeBillingClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def construct_event(self, *, payload: bytes, signature: str):
+            return {
+                "id": "evt_invoice_paid",
+                "type": "invoice.paid",
+                "data": {
+                    "object": {
+                        "customer": "cus_invoice_123",
+                        "subscription": "sub_invoice_123",
+                        "lines": {"data": [{"price": {"id": "price_pro"}}]},
+                    }
+                },
+            }
+
+    monkeypatch.setattr("app.main.StripeBillingClient", FakeStripeBillingClient)
+    client = make_client(
+        tmp_path,
+        stripe_secret_key="sk_test_mock",
+        stripe_webhook_secret="whsec_mock",
+        stripe_success_url="https://example.com/success",
+        stripe_cancel_url="https://example.com/cancel",
+        stripe_portal_return_url="https://example.com/account",
+        stripe_price_starter="price_starter",
+        stripe_price_pro="price_pro",
+    )
+    token = client.post("/v1/auth/register", json={"email": "invoice@example.com", "password": "billing-pass-123"}).json()["access_token"]
+    user = client.app.state.auth_service.user_from_token(token)
+    client.app.state.auth_store.set_stripe_customer(user.id, "cus_invoice_123")
+
+    response = client.post("/v1/billing/stripe-webhook", content=b"{}", headers={"Stripe-Signature": "t=123,v1=abc"})
+
+    assert response.status_code == 200
+    subscription = client.get("/v1/billing/subscription", headers={"Authorization": f"Bearer {token}"})
+    assert subscription.status_code == 200
+    assert subscription.json()["plan_id"] == "pro"
     assert subscription.json()["subscription_status"] == "active"

@@ -44,8 +44,21 @@ test.beforeEach(async ({ page }) => {
         service: "voice-ai",
         environment: "local",
         mode: "demo",
-        tts: { available: true, providers: ["local"], active_provider: "local", encodings: ["MP3"], local_fallback: true },
-        video_localization: { available: true, source_languages: ["en-US", "zh-CN"], target_languages: ["vi"], demo_mode: true },
+        tts: {
+          available: true,
+          providers: ["openai"],
+          active_provider: "openai",
+          encodings: ["MP3"],
+          local_fallback: false,
+          max_input_chars: 4096
+        },
+        video_localization: {
+          available: true,
+          source_languages: ["en-US", "zh-CN"],
+          target_languages: ["vi"],
+          demo_mode: true,
+          max_upload_bytes: 25 * 1024 * 1024
+        },
         auth: { available: true, mode: "local-demo", production_identity: false },
         billing: { available: false, mode: "pricing-copy-only", production_billing: false }
       }
@@ -100,6 +113,7 @@ test("TTS flow renders output and captures desktop evidence", async ({ page }, t
   await page.goto("/");
   await expect(page.getByTestId("prototype-studio")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Text to real voice studio" })).toBeVisible();
+  await expect(page.locator("#character-count")).toHaveText("158 / 4,096 characters");
   await page.getByLabel("Script input").fill("Xin chao tu Voice AI.");
   await page.getByTestId("generate-tts-preview").click();
 
@@ -221,6 +235,7 @@ test("Video localization tab exposes the upload workflow", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "Video localization", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("Source video", { exact: true })).toBeVisible();
   await expect(page.getByTestId("video-file-input")).toHaveAttribute("accept", /video/);
+  await expect(page.locator("#video-file-help")).toContainText("up to 25 MB");
   await expect(page.getByLabel("Source language")).toBeVisible();
   await expect(page.getByLabel("Target")).toHaveValue("Vietnamese script, SRT, dub, MP4");
   await expect(page.getByLabel("Vietnamese voice")).toBeVisible();
@@ -303,7 +318,7 @@ test("pricing selection calls checkout when billing capability is enabled", asyn
   await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/billing\/subscription/, async (route) => {
     await route.fulfill({ json: { status: "trialing", plan_id: "starter-placeholder", entitlement_status: "active" } });
   });
-  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/billing\/checkout/, async (route) => {
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/billing\/checkout-session/, async (route) => {
     const body = route.request().postDataJSON() as { plan_id?: string };
     expect(body.plan_id).toBe("starter-placeholder");
     await route.fulfill({ json: { url: "/checkout-test?session_id=cs_test_123" } });

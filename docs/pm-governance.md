@@ -48,8 +48,9 @@ Future PM updates should refer to stable human-readable roles, not random genera
 | Skill Author Agent B | Not recorded | Skill creation for backend/frontend/infra/QA skills | `docs/subagents/skill-author-b-report.md` |
 | Backend Builder Agent | Not recorded | `voice-ai-backend-builder` | `docs/subagents/backend-report.md` |
 | Frontend Builder Agent | `Frontend Builder Agent` title recorded | `voice-ai-frontend-builder` | `docs/subagents/frontend-report.md` |
-| Infra/Observability Agent | Not recorded | `voice-ai-infra-observability` | No dedicated durable report found yet |
+| Infra/Observability Agent | Not recorded | `voice-ai-infra-observability` | `docs/subagents/infra-report.md`; follow-up reports include `infra-production-completion-audit-20260510.md`, `infra-local-speech-runtime-report-20260510.md`, `infra-production-secret-guard-report-20260510.md`, `infra-video-env-runtime-report-20260510.md`, and `cloud-production-lifecycle-report-20260510.md` |
 | QA Acceptance Agent | Not recorded | `voice-ai-qa-acceptance` | `docs/subagents/qa-report.md` |
+| Tech Lead Reviewer | Not recorded | `voice-ai-techlead-reviewer` | `docs/subagents/techlead-release-review-20260510.md` and `docs/subagents/techlead-runtime-review-20260510.md` |
 
 ## Required Prompt Fields
 
@@ -157,5 +158,5 @@ This governance document is current when:
 
 ## Open Questions
 
-- Which project skills are approved for backend, frontend, infra, QA, docs, security, and PM governance roles?
+- Security does not yet have a dedicated project skill/report owner. Until one exists, security/privacy work is covered by product docs, backend, infra, QA, and tech lead review prompts with explicit write scope.
 - Should PM governance violations block release, or create follow-up tasks when the delivered product behavior is otherwise acceptable?

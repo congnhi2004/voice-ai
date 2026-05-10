@@ -37,7 +37,7 @@ Response headers:
 
 - `X-Request-ID`
 - `X-Job-ID` for synthesis responses.
-- `X-Video-ID` for video upload responses.
+- `X-Video-ID` or `X-Job-ID` for video localization responses when emitted by the implementation.
 
 ## `GET /healthz`
 
@@ -63,7 +63,7 @@ Response `200`:
 {
   "status": "ready",
   "provider": {
-    "name": "google",
+    "name": "openai",
     "ready": true
   },
   "storage": {
@@ -79,6 +79,67 @@ Response `200`:
 
 Response `503` uses the same shape with failed components marked `ready: false`.
 
+## `GET /v1/product/plans`
+
+Returns public pricing/package copy and billing mode. This endpoint is public and may return pricing-copy-only data when Stripe is not configured.
+
+Response `200`:
+
+```json
+{
+  "plans": [
+    {
+      "id": "starter",
+      "name": "Starter",
+      "monthly_price_usd": 0,
+      "included_minutes": 20,
+      "stripe_price_id": null
+    }
+  ],
+  "billing": {
+    "available": false,
+    "mode": "not-configured",
+    "production_billing": false
+  }
+}
+```
+
+## `GET /v1/product/capabilities`
+
+Returns runtime capability metadata used by the frontend to distinguish prototype, billing, auth, provider, and storage readiness. It is evidence, not a production-readiness certificate.
+
+Response `200`:
+
+```json
+{
+  "service": "voice-ai",
+  "environment": "local",
+  "tts": {
+    "available": true,
+    "active_provider": "openai",
+    "local_fallback": true
+  },
+  "video_localization": {
+    "available": true,
+    "demo_mode": false,
+    "ffmpeg_available": true
+  },
+  "auth": {
+    "available": true,
+    "mode": "jwt-password",
+    "production_identity": true,
+    "storage": "sqlite"
+  },
+  "billing": {
+    "available": false,
+    "mode": "not-configured",
+    "production_billing": false
+  }
+}
+```
+
+Commercial release docs must not treat `environment: "local"`, `storage: "sqlite"`, or `billing.production_billing: false` as production-ready.
+
 ## `GET /v1/voices`
 
 Lists voices for the active provider.
@@ -91,12 +152,12 @@ Response `200`:
 
 ```json
 {
-  "provider": "google",
+  "provider": "openai",
   "voices": [
     {
-      "name": "en-US-Standard-C",
-      "language_codes": ["en-US"],
-      "ssml_gender": "FEMALE",
+      "name": "marin",
+      "language_codes": ["vi-VN"],
+      "ssml_gender": null,
       "natural_sample_rate_hz": 24000,
       "supported_encodings": ["MP3", "LINEAR16", "OGG_OPUS"]
     }
@@ -104,97 +165,89 @@ Response `200`:
 }
 ```
 
-## `POST /v1/videos`
+## `POST /v1/video-localization/jobs`
 
-Uploads a source video for localization.
+Current public prototype endpoint. It accepts a source video and localization options in one multipart request, performs short-video localization inline during the HTTP request, and returns the completed job payload when successful.
+
+This endpoint is suitable for controlled prototype testing. It is not the target commercial production shape for long-running workloads.
 
 Request:
 
 - `multipart/form-data`
-- Field `file`: video file.
-- Field `source_language`: `en`, `en-US`, `zh`, `zh-CN`, `zh-TW`, or `auto`.
-- Field `metadata`: optional JSON string with `client_reference_id`.
+- Field `file`: source video file.
+- Field `source_language`: `en-US`, `en`, `zh-CN`, `zh`, or `auto` where supported by the runtime.
+- Field `target_language`: `vi` or `vi-VN`; MVP target is Vietnamese.
+- Field `voice_name`: optional active-provider voice, for example `marin` on OpenAI.
+- Field `subtitle_format`: optional subtitle preference when exposed by the client.
 
-MVP limits:
+Current OpenAI-backed prototype limits:
 
-- `MAX_VIDEO_UPLOAD_MB`: default `250`.
-- `MAX_VIDEO_DURATION_SECONDS`: default `900`.
-- Supported containers/codecs should be documented by implementation; MVP should accept common MP4/H.264 inputs.
+- OpenAI speech-to-text upload limit is 25 MB per file; backend evidence enforces this for current uploaded video bytes.
+- OpenAI text-to-speech request input limit is 4096 characters per synthesis call; production chunking is not proven.
+- Frontend or deploy config may advertise larger video limits, but those are target/planned values until provider-aware validation and chunking are implemented.
 
-Response `202`:
-
-```json
-{
-  "video_id": "vid_01HX123456789ABCDEFG",
-  "status": "uploaded",
-  "source_language": "en-US",
-  "filename": "source.mp4",
-  "bytes": 10485760,
-  "duration_ms": 61234,
-  "storage_uri": "local://data/artifacts/vid_01HX/source.mp4",
-  "request_id": "req_123"
-}
-```
-
-## `POST /v1/localization-jobs`
-
-Creates an asynchronous localization job for an uploaded Chinese or English video.
-
-Request:
+Response `200`:
 
 ```json
 {
-  "video_id": "vid_01HX123456789ABCDEFG",
+  "job_id": "vid_5f5d6bde54404efbb05375c1fdc80d32",
+  "status": "succeeded",
   "source_language": "en-US",
   "target_language": "vi",
-  "subtitle": {
-    "formats": ["srt", "vtt"],
-    "render_mode": "burn_in"
+  "provider": {
+    "name": "openai",
+    "fallback": false,
+    "model": "gpt-4o-mini-transcribe+gpt-4o-mini+gpt-4o-mini-tts"
   },
-  "voice": {
-    "language_code": "vi-VN",
-    "name": "vi-VN-Standard-A",
-    "ssml_gender": "FEMALE"
+  "input_filename": "source-speaking.mp4",
+  "input_bytes": 92659,
+  "transcript_chars": 95,
+  "translated_chars": 112,
+  "segments": [
+    {
+      "index": 1,
+      "start_ms": 0,
+      "end_ms": 6250,
+      "source_text": "Hello, this is a short English video for testing Vietnamese localization on the public website.",
+      "translated_text": "Xin chào, đây là một video tiếng Anh ngắn để thử nghiệm việc địa phương hóa tiếng Việt trên trang web công cộng."
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "transcript",
+      "url": "http://103.27.237.252:8080/v1/video-localization/jobs/vid_5f5d6bde54404efbb05375c1fdc80d32/artifacts/transcript.json",
+      "bytes": 523,
+      "checksum_sha256": "example",
+      "content_type": "application/json"
+    },
+    {
+      "kind": "localized_video",
+      "url": "http://103.27.237.252:8080/v1/video-localization/jobs/vid_5f5d6bde54404efbb05375c1fdc80d32/artifacts/localized.vi.mp4",
+      "bytes": 69087,
+      "checksum_sha256": "example",
+      "content_type": "video/mp4"
+    }
+  ],
+  "latency_ms": 6400,
+  "observability": {
+    "request_id": "req_aeb4dc2b13ed42b68e6f16ba1672f79e",
+    "mlflow_run_id": "568f8bee63c44aed97ec4e325b161bab",
+    "warnings": []
   },
-  "audio": {
-    "encoding": "MP3",
-    "speaking_rate": 1.0,
-    "pitch": 0.0
-  },
-  "render": {
-    "audio_mode": "replace_source",
-    "output_container": "mp4"
-  },
-  "metadata": {
-    "client_reference_id": "video-123"
-  }
+  "warnings": [],
+  "error": null
 }
 ```
 
-Validation rules:
+Current artifact kinds include `source_video`, `source_audio`, `transcript`, `subtitles_srt`, `subtitles_vtt`, `voiceover_audio`, and `localized_video`.
 
-- `video_id` is required.
-- Source language must be English or Chinese for MVP.
-- `target_language` must be `vi`.
-- `subtitle.render_mode` may be `burn_in`, `sidecar`, or `both`.
-- `render.audio_mode` may be `replace_source`, `mix_under`, or `sidecar_audio`.
+Target production behavior:
 
-Response `202`:
+- Split upload, job creation, status polling, and artifact manifest routes may be reintroduced when backed by durable storage and an async worker.
+- Production jobs should return `202 queued` quickly, persist source media to object storage, execute through Cloud Tasks, Cloud Run Jobs, Pub/Sub, or another durable worker, and expose polling/cancel/retry semantics.
+- Production artifact URLs should be signed or authenticated durable object-storage URLs, not local container file paths.
 
-```json
-{
-  "job_id": "loc_01HX123456789ABCDEFG",
-  "video_id": "vid_01HX123456789ABCDEFG",
-  "status": "queued",
-  "stage": "queued",
-  "progress": 0,
-  "status_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG",
-  "artifacts_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG/artifacts",
-  "request_id": "req_123"
-}
-```
-
-## `GET /v1/localization-jobs/{job_id}`
+## `GET /v1/video-localization/jobs/{job_id}`
 
 Returns localization job status.
 
@@ -202,26 +255,17 @@ Response `200`:
 
 ```json
 {
-  "job_id": "loc_01HX123456789ABCDEFG",
-  "video_id": "vid_01HX123456789ABCDEFG",
-  "status": "running",
-  "stage": "translating",
-  "progress": 45,
+  "job_id": "vid_5f5d6bde54404efbb05375c1fdc80d32",
+  "status": "succeeded",
   "source_language": "en-US",
   "target_language": "vi",
-  "created_at": "2026-05-10T10:00:00Z",
-  "updated_at": "2026-05-10T10:02:00Z",
-  "stages": [
-    {"name": "extract_audio", "status": "succeeded", "latency_ms": 900},
-    {"name": "transcribe", "status": "succeeded", "latency_ms": 32000},
-    {"name": "translate", "status": "running", "latency_ms": null}
-  ],
-  "providers": {
-    "transcription": "google-speech-to-text",
-    "translation": "google-cloud-translation",
-    "tts": "google-cloud-text-to-speech",
-    "media": "ffmpeg"
+  "provider": {
+    "name": "openai",
+    "fallback": false,
+    "model": "gpt-4o-mini-transcribe+gpt-4o-mini+gpt-4o-mini-tts"
   },
+  "artifacts": [],
+  "latency_ms": 6400,
   "observability": {
     "request_id": "req_123",
     "mlflow_run_id": "run_abc"
@@ -234,69 +278,71 @@ Terminal statuses: `succeeded`, `failed`, `canceled`.
 
 Non-terminal statuses: `queued`, `running`.
 
-## `GET /v1/localization-jobs/{job_id}/artifacts`
+## `GET /v1/video-localization/jobs/{job_id}/artifacts/{filename}`
 
-Lists generated artifacts. For non-complete jobs, return currently available artifacts.
+Downloads a generated artifact file for the current public prototype.
+
+Supported current filenames include:
+
+- Source and extracted media, for example `source-speaking.mp4` and `source-audio.mp3`.
+- `transcript.json`.
+- `subtitles.vi.srt` and `subtitles.vi.vtt`.
+- `voiceover.vi.wav`.
+- `localized.vi.mp4`.
+
+Production may return a signed Cloud Storage URL redirect, an authenticated stream, or a JSON envelope containing a temporary URL depending on access policy.
+
+## Billing Routes
+
+Billing is present as a backend capability but is not configured on the current public prototype. Commercial purchase flow must remain blocked until Stripe secrets, URLs, webhook handling, entitlement checks, and frontend/backend route compatibility are verified.
+
+### `GET /v1/billing/subscription`
+
+Returns the authenticated user's subscription and entitlement state. Requires a session/auth token when auth is enabled.
+
+### `POST /v1/billing/checkout-session`
+
+Current backend route for creating a Stripe Checkout Session.
+
+Request:
+
+```json
+{
+  "plan_id": "creator"
+}
+```
 
 Response `200`:
 
 ```json
 {
-  "job_id": "loc_01HX123456789ABCDEFG",
-  "status": "succeeded",
-  "artifacts": [
-    {
-      "type": "vietnamese_transcript",
-      "format": "txt",
-      "download_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG/artifacts/vietnamese_transcript/download",
-      "bytes": 4096,
-      "checksum_sha256": "example"
-    },
-    {
-      "type": "subtitles_srt",
-      "format": "srt",
-      "download_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG/artifacts/subtitles_srt/download",
-      "bytes": 2048,
-      "checksum_sha256": "example"
-    },
-    {
-      "type": "subtitles_vtt",
-      "format": "vtt",
-      "download_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG/artifacts/subtitles_vtt/download",
-      "bytes": 2048,
-      "checksum_sha256": "example"
-    },
-    {
-      "type": "vietnamese_audio",
-      "format": "mp3",
-      "download_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG/artifacts/vietnamese_audio/download",
-      "duration_ms": 59000,
-      "bytes": 940000
-    },
-    {
-      "type": "localized_video",
-      "format": "mp4",
-      "download_url": "/v1/localization-jobs/loc_01HX123456789ABCDEFG/artifacts/localized_video/download",
-      "duration_ms": 61234,
-      "bytes": 12000000
-    }
-  ]
+  "url": "https://checkout.stripe.com/c/pay/cs_test_...",
+  "session_id": "cs_test_123"
 }
 ```
 
-## `GET /v1/localization-jobs/{job_id}/artifacts/{artifact_type}/download`
+Response `503`:
 
-Downloads or redirects to the requested artifact.
+```json
+{
+  "error": {
+    "code": "billing_not_configured",
+    "message": "Stripe billing is not configured."
+  }
+}
+```
 
-Supported MVP artifact types:
+### `POST /v1/billing/customer-portal`
 
-- `vietnamese_transcript`
-- `subtitles_srt`
-- `subtitles_vtt`
-- `vietnamese_audio`
-- `localized_video`
+Current backend route for creating a Stripe customer portal session. Returns the same `url`/`session_id` response shape as Checkout.
 
-Production may return a signed Cloud Storage URL redirect, an authenticated stream, or a JSON envelope containing a temporary URL depending on access policy.
+### Compatibility aliases
+
+The frontend audit observed calls to `POST /v1/billing/checkout` and `POST /v1/billing/portal`. Those aliases are compatibility targets only unless a backend agent adds and verifies them. Until then, the documented backend routes are `/v1/billing/checkout-session` and `/v1/billing/customer-portal`.
+
+### `POST /v1/billing/stripe-webhook`
+
+Stripe webhook receiver for billing lifecycle events. Production release must follow Stripe webhook guidance: verify signatures, make fulfillment idempotent, check payment/subscription state, and handle subscription lifecycle events before granting paid entitlements.
 
 ## `POST /v1/synthesize`
 
@@ -306,12 +352,12 @@ Request:
 
 ```json
 {
-  "text": "Hello from Voice AI.",
+  "text": "Xin chào từ Voice AI.",
   "ssml": null,
   "voice": {
-    "language_code": "en-US",
-    "name": "en-US-Standard-C",
-    "ssml_gender": "FEMALE"
+    "language_code": "vi-VN",
+    "name": "marin",
+    "ssml_gender": null
   },
   "audio": {
     "encoding": "MP3",
@@ -330,6 +376,7 @@ Validation rules:
 
 - Exactly one of `text` or `ssml` is required.
 - `text` or `ssml` must not exceed `MAX_INPUT_CHARS`.
+- For the current OpenAI provider path, request text must not exceed the OpenAI TTS 4096 character input limit unless the backend intentionally chunks requests.
 - `voice.language_code` is required.
 - `audio.encoding` defaults to `MP3`.
 - Supported MVP encodings: `MP3`, `LINEAR16`, `OGG_OPUS`.
@@ -345,14 +392,14 @@ Response `200`:
   "duration_ms": 1250,
   "latency_ms": 842,
   "provider": {
-    "name": "google",
+    "name": "openai",
     "fallback": false,
-    "model": "cloud-text-to-speech"
+    "model": "gpt-4o-mini-tts"
   },
   "voice": {
-    "language_code": "en-US",
-    "name": "en-US-Standard-C",
-    "ssml_gender": "FEMALE"
+    "language_code": "vi-VN",
+    "name": "marin",
+    "ssml_gender": null
   },
   "audio": {
     "encoding": "MP3",
@@ -392,7 +439,7 @@ All non-2xx errors return:
     "code": "provider_unavailable",
     "message": "Text-to-speech provider is not ready.",
     "details": {
-      "provider": "google"
+      "provider": "openai"
     }
   },
   "request_id": "req_123",
@@ -418,6 +465,7 @@ Common status codes:
 - `TTS_PROVIDER`
 - `TRANSCRIPTION_PROVIDER`
 - `TRANSLATION_PROVIDER`
+- `OPENAI_API_KEY`
 - `GOOGLE_APPLICATION_CREDENTIALS`
 - `GCP_PROJECT_ID`
 - `MLFLOW_TRACKING_URI`
@@ -427,6 +475,13 @@ Common status codes:
 - `AUDIO_BASE_URL`
 - `ARTIFACT_BASE_URL`
 - `API_KEYS`
+- `JWT_SECRET`
+- `AUTH_STORAGE_PATH`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_SUCCESS_URL`
+- `STRIPE_CANCEL_URL`
+- `STRIPE_PORTAL_RETURN_URL`
 - `CORS_ALLOW_ORIGINS`
 - `MAX_INPUT_CHARS`
 - `MAX_VIDEO_UPLOAD_MB`
@@ -435,8 +490,10 @@ Common status codes:
 
 ## Current Source Notes
 
-- Google Speech-to-Text asynchronous recognition should back long-running transcription jobs for uploaded videos.
-- Google Speech-to-Text language support includes English and Chinese variants; target translation is Vietnamese through Google Cloud Translation.
+- Current public prototype evidence uses OpenAI for TTS and video localization, local storage, Docker/tmux runtime, FFmpeg, and internal/local MLflow tracking.
+- OpenAI TTS input is limited to 4096 characters per request; OpenAI speech-to-text uploads are limited to 25 MB.
+- Google Speech-to-Text asynchronous recognition remains the target Google-backed production option for long-running English/Chinese transcription if Google is selected.
+- Google Speech-to-Text language support includes English and Chinese variants; target translation can use Google Cloud Translation if Google is selected.
 - Google Video Intelligence speech transcription is not the preferred source for this MVP because that feature is English-only.
-- Google Text-to-Speech `text:synthesize` remains the direct Vietnamese voice generation API.
+- Google Text-to-Speech `text:synthesize` remains a target Vietnamese voice generation option if Google is selected.
 - FFmpeg is the expected implementation boundary for local media transforms and final MP4 rendering.

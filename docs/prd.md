@@ -6,8 +6,8 @@ Teams need a dependable way to localize English or Chinese videos into Vietnames
 
 ## Goals
 
-- Provide a production-grade video localization pipeline backed by Google Speech-to-Text, Cloud Translation, Google Cloud Text-to-Speech, and FFmpeg.
-- Preserve the existing production-grade TTS API for direct Vietnamese voice generation.
+- Provide a production-target video localization pipeline backed by OpenAI or Google speech/translation/TTS providers and FFmpeg.
+- Preserve the existing TTS API for direct Vietnamese voice generation.
 - Make local development and CI independent from live Google credentials through a fallback/demo provider.
 - Track every localization job and synthesis request with useful operational and product metrics.
 - Deploy as a Cloud Run service with documented CI/CD, rollback, and environment management.
@@ -29,27 +29,26 @@ Teams need a dependable way to localize English or Chinese videos into Vietnames
 ### Voice Catalog
 
 - `GET /v1/voices` returns the voice catalog available for the active provider.
-- Production should proxy/cache Google voice metadata where feasible.
+- Production should proxy/cache active provider voice metadata where feasible.
 - Local fallback may return a small deterministic set of fake voices.
 
 ### Video Localization
 
-- `POST /v1/videos` accepts a Chinese or English video upload and returns `video_id`.
-- `POST /v1/localization-jobs` creates an asynchronous localization job for an uploaded video.
-- `GET /v1/localization-jobs/{job_id}` returns status, progress, current stage, timing, provider metadata, and error details.
-- `GET /v1/localization-jobs/{job_id}/artifacts` lists generated artifacts and download URLs.
-- `GET /v1/localization-jobs/{job_id}/artifacts/{artifact_type}/download` downloads a requested artifact.
+- Current public prototype: `POST /v1/video-localization/jobs` accepts a Chinese or English video upload plus localization options as multipart form data and returns a completed job payload for short videos.
+- Current public prototype: `GET /v1/video-localization/jobs/{job_id}` returns the recorded job payload when available.
+- Current public prototype: `GET /v1/video-localization/jobs/{job_id}/artifacts/{filename}` downloads generated source, transcript, subtitle, voiceover, or localized MP4 artifacts.
+- Target production model: split source upload, asynchronous job creation, status polling, cancel/retry, and artifact manifest routes backed by durable storage and a worker.
 - MVP artifact types: Vietnamese transcript/script, SRT, VTT, Vietnamese TTS audio, and final localized MP4.
 - Source language must be English or Chinese. Target language is Vietnamese for MVP.
 - The pipeline must extract audio, transcribe source speech with timestamps, translate transcript/script to Vietnamese, create Vietnamese subtitle files, synthesize Vietnamese voice audio, and render final MP4.
-- Production should use Google Speech-to-Text asynchronous or long-audio recognition for source transcription rather than Video Intelligence speech transcription because Video Intelligence speech transcription is English-only for that feature.
+- Production async mode should use a provider path that supports the chosen language and file-size/duration limits. Google Speech-to-Text asynchronous or long-audio recognition remains a target option for English/Chinese. The current public prototype uses OpenAI for real TTS/video localization.
 - FFmpeg is required for audio extraction, subtitle processing, audio muxing/replacement, and final MP4 rendering.
 
 ### Synthesis
 
 - `POST /v1/synthesize` accepts text or SSML, language/voice settings, audio encoding, and tuning parameters.
-- The service calls Google Cloud Text-to-Speech in production using required `input`, `voice`, and `audioConfig` concepts from the official API.
-- The service decodes Google base64 audio into a stored audio file.
+- The current public prototype calls OpenAI TTS with `gpt-4o-mini-tts` and voices such as `marin`; Google Cloud Text-to-Speech remains a production target option when Google credentials are configured.
+- Provider-specific audio is stored as a generated audio file.
 - The response returns JSON with `job_id`, `status`, `audio_url`, `audio_path`, `duration_ms`, `latency_ms`, `provider`, and metadata.
 - Requests must be idempotent only when a client supplies an idempotency key; otherwise each request creates a new job.
 
@@ -67,10 +66,10 @@ Teams need a dependable way to localize English or Chinese videos into Vietnames
 
 ## Non-Functional Requirements
 
-- Video localization is asynchronous. MVP target: accepted upload/job creation under 5 seconds; job completion target depends on video duration and provider latency.
+- Current public prototype video localization is synchronous inline request work and is suitable only for short controlled tests. Production video localization must be asynchronous; target accepted upload/job creation is under 5 seconds, with completion dependent on duration and provider latency.
 - P95 synthesis API latency target: under 4 seconds for typical short Vietnamese text, excluding provider incidents.
-- Request body limit: default 5,000 characters for MVP unless product explicitly raises it.
-- Upload size and duration limits must be configurable, with MVP defaults documented in the API contract.
+- Request body limit must be provider-aware. OpenAI TTS currently has a 4096 character input limit; backend defaults above that are not production-ready without chunking.
+- Upload size and duration limits must be configurable and provider-aware. OpenAI STT file uploads are limited to 25 MB; larger frontend/deploy limits are target values until chunking or a large-file provider path is implemented.
 - Structured JSON errors for validation, auth, provider failure, quota, and storage failure.
 - Logs must include request id, job id, video id, stage, and artifact ids, but not raw transcript/script text by default.
 - MLflow logging must degrade gracefully if unavailable, while surfacing readiness warnings.
@@ -81,15 +80,15 @@ Teams need a dependable way to localize English or Chinese videos into Vietnames
 - All acceptance checklist items have evidence.
 - Local tests pass without Google credentials.
 - Local/demo mode can produce deterministic video localization artifacts.
-- A staging deployment has localized at least one English or Chinese sample video into Vietnamese.
-- A staging deployment has generated at least one Google-backed audio file.
+- The public prototype has localized at least one English and one Chinese short sample video into Vietnamese with real OpenAI provider evidence.
+- A production candidate has generated at least one provider-backed audio file under the intended production provider and limit settings.
 - MLflow contains a run for a staging localization job and a staging synthesis request.
 - Deployment runbook has been exercised by QA or infra.
 
 ## Key Risks
 
-- Missing or invalid Google credentials block production synthesis.
-- Missing or invalid Google Speech-to-Text or Translation configuration blocks production localization.
+- Missing or invalid provider credentials block production synthesis/localization for that provider.
+- OpenAI provider limits can reject longer text or video inputs unless the product implements chunking or a different large-file path.
 - Cloud Run filesystem is not durable; production audio must move to Cloud Storage or equivalent.
 - Video files are larger and more sensitive than text/audio-only artifacts; storage cost, retention, and access control must be explicit.
 - Subtitle timing and translated speech duration may not match source timing automatically; MVP must state quality limits and evidence expectations.
@@ -98,8 +97,9 @@ Teams need a dependable way to localize English or Chinese videos into Vietnames
 
 ## Current Source Notes
 
-- Use Google Speech-to-Text for English/Chinese source transcription because it supports asynchronous recognition and has English/Chinese language coverage.
-- Use Google Cloud Translation for Vietnamese target translation.
-- Use Google Cloud Text-to-Speech for Vietnamese voice/dub audio generation.
+- Current public prototype uses OpenAI for real TTS and video localization, local storage, local/tmux runtime, and MLflow internal tracking.
+- Use Google Speech-to-Text for the target asynchronous English/Chinese production transcription path if Google is selected because it supports asynchronous recognition and has English/Chinese language coverage.
+- Use Google Cloud Translation for Vietnamese target translation if Google is selected.
+- Use Google Cloud Text-to-Speech for Vietnamese voice/dub audio generation if Google is selected.
 - Do not rely on Video Intelligence speech transcription for Chinese coverage; official guidance states that feature is English-only.
 - Use FFmpeg for deterministic media processing and final MP4 rendering.
