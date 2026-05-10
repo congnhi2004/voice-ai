@@ -28,6 +28,7 @@ services:
       - ./data/audio:/app/data/audio
       - ./data/video:/app/data/video
       - ./data/artifacts:/app/data/artifacts
+      - ./artifacts/mlflow:/mlflow/artifacts
       - ./logs:/app/logs
     depends_on:
       mlflow:
@@ -95,6 +96,7 @@ services:
       - ./data/audio:/app/data/audio
       - ./data/video:/app/data/video
       - ./data/artifacts:/app/data/artifacts
+      - ./artifacts/mlflow:/mlflow/artifacts
       - ./logs:/app/logs
     depends_on:
       mlflow:
