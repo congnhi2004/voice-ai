@@ -31,8 +31,8 @@ Context7 via MCP Docker before code edits:
 
 Local evidence reviewed:
 
-- Before desktop screenshot: `/home/jhao/code/voice-ai/docs/subagents/frontend-desktop-visual-review.png`
-- Before mobile screenshot: `/home/jhao/code/voice-ai/docs/subagents/frontend-mobile-visual-review.png`
+- Before desktop screenshot: `/home/jhao/code/voice-ai/docs/subagents/evidence/images/frontend-desktop-visual-review.png`
+- Before mobile screenshot: `/home/jhao/code/voice-ai/docs/subagents/evidence/images/frontend-mobile-visual-review.png`
 - Skill instructions: `/home/jhao/.codex/skills/voice-ai-frontend-builder/SKILL.md`
 - Taste Kit redesign skill: `/home/jhao/.codex/plugins/cache/taste-kit/taste-kit/0.1.0/skills/redesign-skill/SKILL.md`
 
@@ -56,8 +56,8 @@ After:
 
 Fresh screenshots:
 
-- `/home/jhao/code/voice-ai/docs/subagents/frontend-desktop-visual-review-v2.png`
-- `/home/jhao/code/voice-ai/docs/subagents/frontend-mobile-visual-review-v2.png`
+- `/home/jhao/code/voice-ai/docs/subagents/evidence/images/frontend-desktop-visual-review-v2.png`
+- `/home/jhao/code/voice-ai/docs/subagents/evidence/images/frontend-mobile-visual-review-v2.png`
 
 ## Files Changed
 
@@ -139,13 +139,13 @@ Running 2 tests using 1 worker
 ### Screenshot Capture
 
 ```text
-$ LD_LIBRARY_PATH=/tmp/voice-ai-browser-deps/extracted/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH npx playwright screenshot --browser=chromium --viewport-size=1440,1000 --full-page http://103.27.237.252:4174/ ../docs/subagents/frontend-desktop-visual-review-v2.png
+$ LD_LIBRARY_PATH=/tmp/voice-ai-browser-deps/extracted/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH npx playwright screenshot --browser=chromium --viewport-size=1440,1000 --full-page http://103.27.237.252:4174/ ../docs/subagents/evidence/images/frontend-desktop-visual-review-v2.png
 Navigating to http://103.27.237.252:4174/
-Capturing screenshot into ../docs/subagents/frontend-desktop-visual-review-v2.png
+Capturing screenshot into ../docs/subagents/evidence/images/frontend-desktop-visual-review-v2.png
 
-$ LD_LIBRARY_PATH=/tmp/voice-ai-browser-deps/extracted/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH npx playwright screenshot --browser=chromium --viewport-size=390,1200 --full-page http://103.27.237.252:4174/ ../docs/subagents/frontend-mobile-visual-review-v2.png
+$ LD_LIBRARY_PATH=/tmp/voice-ai-browser-deps/extracted/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH npx playwright screenshot --browser=chromium --viewport-size=390,1200 --full-page http://103.27.237.252:4174/ ../docs/subagents/evidence/images/frontend-mobile-visual-review-v2.png
 Navigating to http://103.27.237.252:4174/
-Capturing screenshot into ../docs/subagents/frontend-mobile-visual-review-v2.png
+Capturing screenshot into ../docs/subagents/evidence/images/frontend-mobile-visual-review-v2.png
 ```
 
 ### Public Link Smoke

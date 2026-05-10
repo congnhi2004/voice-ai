@@ -16,6 +16,70 @@ Official/current sources checked on 2026-05-10:
 - Cloud Run service request timeout: https://cloud.google.com/run/docs/configuring/request-timeout
 - Cloud Tasks HTTP target tasks: https://cloud.google.com/tasks/docs/creating-http-target-tasks
 - MLflow Tracking and Tracking UI/server docs: https://www.mlflow.org/docs/latest/ml/tracking
+- MLflow host-header and artifact server docs checked during runtime sync: Context7 `/mlflow/mlflow`, topics `server allowed-hosts artifacts tracking URI`; official MLflow network security docs at https://mlflow.org/docs/latest/self-hosting/security/network/
+
+## Runtime Sync 2026-05-10
+
+Scope: rebuilt the public backend runtime from current source, fixed local MLflow connectivity for backend logging, and verified the public API on `http://103.27.237.252:8080`.
+
+Files updated in this pass:
+
+- `scripts/local-services.sh`: starts MLflow with explicit allowed hosts for Docker-internal backend access, passes through provider/OpenAI environment variables without printing secret values, mounts MLflow artifacts into the backend container, and keeps public MLflow blocked by default.
+- `docker-compose.yml`: mirrors provider/OpenAI env passthrough, MLflow allowed-hosts, and the backend/worker MLflow artifact mount.
+- `docs/subagents/infra-report.md`: records this runtime sync.
+
+Commands run:
+
+```bash
+bash -n scripts/local-services.sh
+docker compose config --quiet
+taskset -c 0-3 docker build -t voice-ai:durable-20260510 .
+IMAGE=voice-ai:durable-20260510 ./scripts/local-services.sh restart
+```
+
+Current containers after clean restart:
+
+```text
+voice-ai-backend   voice-ai:durable-20260510       0.0.0.0:8080->8080/tcp   healthy
+voice-ai-mlflow    ghcr.io/mlflow/mlflow:v3.12.0   0.0.0.0:5000->5000/tcp   running
+```
+
+Runtime configuration notes:
+
+- `TTS_PROVIDER` defaults to `local` unless supplied by the shell.
+- `OPENAI_API_KEY`, `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE`, and `OPENAI_TTS_RESPONSE_FORMAT` are passed through from the shell when set; secret values are not echoed by the script.
+- No OpenAI environment was supplied during this verification, so public TTS used the local fallback provider.
+- Backend MLflow uses `MLFLOW_TRACKING_URI=http://voice-ai-mlflow:5000`.
+- MLflow allowed hosts default to Docker/local names only: `voice-ai-mlflow`, `voice-ai-mlflow:5000`, localhost variants, and `host.docker.internal` variants. Public `http://103.27.237.252:5000/` remains `403`.
+- Existing MLflow experiment artifact URIs use `/mlflow/artifacts/...`; the backend now mounts `./artifacts/mlflow:/mlflow/artifacts` so `mlflow.log_artifact(...)` succeeds.
+
+Public verification results:
+
+```text
+GET /healthz -> 200
+{"status":"ok","service":"voice-ai","version":"0.1.0"}
+
+GET /readyz -> 200
+{"status":"ready","mlflow":{"configured":true,"ready":true,"detail":null}}
+
+POST /v1/video-localization/jobs with fake MP4 -> 400
+{"code":"invalid_video_upload","message":"Uploaded MP4 is too small to contain a playable video."}
+
+POST /v1/synthesize -> 200
+provider=local fallback=true mlflow_run_id=2c16148d56eb44abb09b1e9c69104710 warnings=[]
+audio download -> 200, RIFF/WAVE PCM
+
+POST /v1/video-localization/jobs with valid sample MP4 -> 200
+provider=local fallback=true mlflow_run_id=10ecd053183f4c6ea121d659629da48e warnings=[] artifact_count=6
+
+GET http://103.27.237.252:5000/ -> 403
+```
+
+Remaining blockers:
+
+- None for the requested local/public runtime sync.
+- OpenAI TTS was not exercised because no OpenAI environment values were supplied in the shell.
+- Public MLflow UI remains intentionally blocked; expose it only behind explicit allowed-host/reverse-proxy/auth configuration.
 
 ## Running Services
 
