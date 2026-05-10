@@ -1,0 +1,381 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from .config import Settings
+from .models import (
+    AudioOptions,
+    ProviderInfo,
+    SynthesizeRequest,
+    SubtitleSegment,
+    VideoArtifact,
+    VideoLocalizationStatus,
+    VoiceSelection,
+)
+from .observability import MlflowTracker
+from .providers import TTSProvider
+
+
+@dataclass(frozen=True)
+class LocalizedText:
+    source_language: str
+    target_language: str
+    segments: list[SubtitleSegment]
+
+
+class VideoValidationError(ValueError):
+    """Raised when an uploaded video is not usable as a source MP4."""
+
+
+class VideoRenderError(RuntimeError):
+    """Raised when FFmpeg cannot create a usable localized MP4."""
+
+
+class LocalVideoLocalizationProvider:
+    name = "local"
+    fallback = True
+    model = "deterministic-video-localization-demo"
+
+    def transcribe(self, source_language: str, uploaded_bytes: bytes) -> str:
+        size_hint = len(uploaded_bytes)
+        if source_language.startswith("zh"):
+            return f"Demo transcript from uploaded Chinese video, {size_hint} bytes."
+        return f"Demo transcript from uploaded English video, {size_hint} bytes."
+
+    def translate_to_vietnamese(self, transcript: str, source_language: str) -> str:
+        return f"Ban dich tieng Viet demo: {transcript}"
+
+    def segment(self, transcript: str, translated: str) -> list[SubtitleSegment]:
+        duration_ms = max(1500, min(8000, len(translated) * 35))
+        return [
+            SubtitleSegment(
+                index=1,
+                start_ms=0,
+                end_ms=duration_ms,
+                source_text=transcript,
+                translated_text=translated,
+            )
+        ]
+
+
+class VideoJobStore:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.root = settings.video_jobs_dir
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def job_dir(self, job_id: str) -> Path:
+        return self.root / job_id
+
+    def save_status(self, status: VideoLocalizationStatus) -> None:
+        path = self.job_dir(status.job_id) / "status.json"
+        path.write_text(status.model_dump_json(indent=2), encoding="utf-8")
+
+    def load_status(self, job_id: str) -> VideoLocalizationStatus | None:
+        path = self.job_dir(job_id) / "status.json"
+        if not path.exists():
+            return None
+        return VideoLocalizationStatus.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def artifact_path(self, job_id: str, filename: str) -> Path:
+        path = (self.job_dir(job_id) / filename).resolve()
+        root = self.job_dir(job_id).resolve()
+        if root not in path.parents and path != root:
+            raise ValueError("Artifact path escapes job directory")
+        return path
+
+
+def checksum(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ms_to_srt_time(ms: int) -> str:
+    seconds, milli = divmod(ms, 1000)
+    minutes, sec = divmod(seconds, 60)
+    hours, minute = divmod(minutes, 60)
+    return f"{hours:02}:{minute:02}:{sec:02},{milli:03}"
+
+
+def ms_to_vtt_time(ms: int) -> str:
+    return ms_to_srt_time(ms).replace(",", ".")
+
+
+def write_subtitles(job_dir: Path, segments: list[SubtitleSegment]) -> tuple[Path, Path]:
+    srt_path = job_dir / "subtitles.vi.srt"
+    vtt_path = job_dir / "subtitles.vi.vtt"
+    srt_blocks = []
+    vtt_blocks = ["WEBVTT", ""]
+    for segment in segments:
+        srt_blocks.append(
+            f"{segment.index}\n{ms_to_srt_time(segment.start_ms)} --> {ms_to_srt_time(segment.end_ms)}\n{segment.translated_text}\n"
+        )
+        vtt_blocks.append(
+            f"{ms_to_vtt_time(segment.start_ms)} --> {ms_to_vtt_time(segment.end_ms)}\n{segment.translated_text}\n"
+        )
+    srt_path.write_text("\n".join(srt_blocks), encoding="utf-8")
+    vtt_path.write_text("\n".join(vtt_blocks), encoding="utf-8")
+    return srt_path, vtt_path
+
+
+def artifact(settings: Settings, job_id: str, kind: str, path: Path, content_type: str) -> VideoArtifact:
+    return VideoArtifact(
+        kind=kind,
+        path=str(path),
+        url=f"{settings.service_base_url}/v1/video-localization/jobs/{job_id}/artifacts/{path.name}",
+        bytes=path.stat().st_size,
+        checksum_sha256=checksum(path),
+        content_type=content_type,
+    )
+
+
+def _ffprobe_path(settings: Settings) -> str | None:
+    ffmpeg = shutil.which(settings.ffmpeg_path)
+    if ffmpeg:
+        sibling = Path(ffmpeg).with_name("ffprobe")
+        if sibling.exists():
+            return str(sibling)
+    return shutil.which("ffprobe")
+
+
+def _top_level_mp4_boxes(data: bytes) -> set[str]:
+    boxes: set[str] = set()
+    offset = 0
+    while offset + 8 <= len(data):
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        box_type = data[offset + 4 : offset + 8]
+        header_size = 8
+        if size == 1:
+            if offset + 16 > len(data):
+                raise VideoValidationError("MP4 box has an incomplete extended size header.")
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = len(data) - offset
+        if size < header_size or offset + size > len(data):
+            label = box_type.decode("ascii", errors="replace")
+            raise VideoValidationError(f"MP4 box {label!r} has an invalid size.")
+        boxes.add(box_type.decode("ascii", errors="ignore"))
+        offset += size
+    return boxes
+
+
+def validate_mp4_container(path: Path, settings: Settings) -> None:
+    data = path.read_bytes()
+    if len(data) < 32:
+        raise VideoValidationError("Uploaded MP4 is too small to contain a playable video.")
+    try:
+        boxes = _top_level_mp4_boxes(data)
+    except VideoValidationError:
+        raise
+    except Exception as exc:
+        raise VideoValidationError(f"Uploaded MP4 could not be parsed: {exc}") from exc
+    if "ftyp" not in boxes:
+        raise VideoValidationError("Uploaded file is missing the MP4 ftyp box.")
+    if "mdat" not in boxes:
+        raise VideoValidationError("Uploaded MP4 has no media data.")
+    if "moov" not in boxes and "moof" not in boxes:
+        raise VideoValidationError("Uploaded MP4 is missing movie metadata.")
+
+    ffprobe = _ffprobe_path(settings)
+    if not ffprobe:
+        return
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "ffprobe rejected the uploaded MP4").strip()
+        raise VideoValidationError(f"Uploaded MP4 is not a valid playable video: {detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise VideoValidationError("Uploaded MP4 validation timed out.") from exc
+    try:
+        streams = json.loads(completed.stdout or "{}").get("streams", [])
+    except json.JSONDecodeError as exc:
+        raise VideoValidationError("Uploaded MP4 validation returned malformed ffprobe output.") from exc
+    if not any(stream.get("codec_type") == "video" for stream in streams):
+        raise VideoValidationError("Uploaded MP4 does not contain a video stream.")
+
+
+def render_or_copy_video(settings: Settings, input_video: Path, vietnamese_audio: Path, subtitles: Path, output_video: Path) -> str | None:
+    ffmpeg = shutil.which(settings.ffmpeg_path)
+    if not ffmpeg:
+        shutil.copyfile(input_video, output_video)
+        return "ffmpeg not available; final MP4 is a validated local demo copy of the uploaded video while audio/subtitle artifacts are generated separately"
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(input_video),
+        "-i",
+        str(vietnamese_audio),
+        "-i",
+        str(subtitles),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-map",
+        "2:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-c:s",
+        "mov_text",
+        "-metadata:s:a:0",
+        "language=vie",
+        "-metadata:s:s:0",
+        "language=vie",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(output_video),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        validate_mp4_container(output_video, settings)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "ffmpeg mux failed").strip()
+        if output_video.exists():
+            output_video.unlink()
+        raise VideoRenderError(f"FFmpeg could not mux localized MP4: {detail}") from exc
+    except Exception as exc:
+        if output_video.exists():
+            output_video.unlink()
+        raise VideoRenderError(f"Localized MP4 validation failed: {exc}") from exc
+    return None
+
+
+def safe_source_filename(input_filename: str) -> str:
+    name = Path(input_filename).name or "source.mp4"
+    if Path(name).suffix.lower() != ".mp4":
+        return f"{Path(name).stem or 'source'}.mp4"
+    return name
+
+
+def localize_video(
+    *,
+    settings: Settings,
+    store: VideoJobStore,
+    tracker: MlflowTracker,
+    tts_provider: TTSProvider,
+    request_id: str,
+    job_id: str,
+    input_filename: str,
+    input_content_type: str | None,
+    uploaded_bytes: bytes,
+    source_language: str,
+    voice_name: str | None,
+) -> VideoLocalizationStatus:
+    started = time.perf_counter()
+    job_dir = store.job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    source_path = job_dir / safe_source_filename(input_filename)
+    source_path.write_bytes(uploaded_bytes)
+    validate_mp4_container(source_path, settings)
+
+    provider = LocalVideoLocalizationProvider()
+    transcript = provider.transcribe(source_language, uploaded_bytes)
+    translated = provider.translate_to_vietnamese(transcript, source_language)
+    segments = provider.segment(transcript, translated)
+    transcript_path = job_dir / "transcript.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "source_language": source_language,
+                "target_language": "vi",
+                "segments": [segment.model_dump() for segment in segments],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    srt_path, vtt_path = write_subtitles(job_dir, segments)
+
+    tts_request = SynthesizeRequest(
+        text=translated,
+        voice=VoiceSelection(language_code="vi-VN", name=voice_name or "local-vi-VN-test-voice", ssml_gender="NEUTRAL"),
+        audio=AudioOptions(encoding="LINEAR16", sample_rate_hz=24000),
+        metadata={"video_job_id": job_id},
+    )
+    tts_result = tts_provider.synthesize(tts_request)
+    audio_path = job_dir / "voiceover.vi.wav"
+    audio_path.write_bytes(tts_result.audio_bytes)
+    output_video = job_dir / "localized.vi.mp4"
+    warnings = []
+    mux_warning = render_or_copy_video(settings, source_path, audio_path, srt_path, output_video)
+    if mux_warning:
+        warnings.append(mux_warning)
+
+    latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+    artifacts = [
+        artifact(settings, job_id, "source_video", source_path, input_content_type or "video/mp4"),
+        artifact(settings, job_id, "transcript", transcript_path, "application/json"),
+        artifact(settings, job_id, "subtitles_srt", srt_path, "application/x-subrip"),
+        artifact(settings, job_id, "subtitles_vtt", vtt_path, "text/vtt"),
+        artifact(settings, job_id, "voiceover_audio", audio_path, "audio/wav"),
+        artifact(settings, job_id, "localized_video", output_video, "video/mp4"),
+    ]
+    mlflow = tracker.track_synthesis(
+        request_id=request_id,
+        job_id=job_id,
+        provider="video-local",
+        fallback=True,
+        environment=settings.environment,
+        voice_name=voice_name or "local-vi-VN-test-voice",
+        language_code="vi-VN",
+        audio_encoding="LINEAR16",
+        speaking_rate=1.0,
+        pitch=0.0,
+        sample_rate_hz=24000,
+        input_type="video",
+        input_chars=len(translated),
+        latency_ms=latency_ms,
+        provider_latency_ms=latency_ms,
+        duration_ms=tts_result.duration_ms,
+        audio_bytes=audio_path.stat().st_size,
+        success=True,
+        audio_path=audio_path,
+        checksum_sha256=checksum(audio_path),
+        status="succeeded",
+    )
+    if mlflow.warning and settings.environment != "production":
+        warnings.append(mlflow.warning)
+    status = VideoLocalizationStatus(
+        job_id=job_id,
+        status="succeeded",
+        source_language=source_language,
+        target_language="vi",
+        provider=ProviderInfo(name=provider.name, fallback=provider.fallback, model=provider.model),
+        input_filename=input_filename,
+        input_bytes=len(uploaded_bytes),
+        transcript_chars=len(transcript),
+        translated_chars=len(translated),
+        segments=segments,
+        artifacts=artifacts,
+        latency_ms=latency_ms,
+        observability={"request_id": request_id, "mlflow_run_id": mlflow.run_id, "warnings": [mlflow.warning] if mlflow.warning else []},
+        warnings=warnings,
+    )
+    store.save_status(status)
+    return status

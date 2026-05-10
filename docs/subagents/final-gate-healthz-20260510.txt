@@ -1,0 +1,2 @@
+{"status":"ok","service":"voice-ai","version":"0.1.0"}
+HTTP 200

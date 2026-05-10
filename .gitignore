@@ -1,0 +1,75 @@
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node/frontend dependencies and generated output
+frontend/node_modules/
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/test-results/
+frontend/playwright-report/
+frontend/coverage/
+dist/
+build/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+google-credentials*.json
+service-account*.json
+gha-creds-*.json
+
+# Logs and runtime output
+logs/
+*.log
+tmp/
+temp/
+
+# MLflow/local experiment state
+mlruns/
+artifacts/
+*.sqlite
+*.sqlite3
+*.db
+
+# Uploaded/generated media artifacts
+data/audio/
+data/video/
+data/video-jobs/
+data/artifacts/
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.srt
+*.vtt
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

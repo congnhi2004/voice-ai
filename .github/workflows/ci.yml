@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          elif [[ -f backend/requirements.txt ]]; then
+            pip install -r backend/requirements.txt
+          elif [[ -f pyproject.toml ]]; then
+            pip install ".[dev]" || pip install .
+          elif [[ -f backend/pyproject.toml ]]; then
+            pip install "./backend[dev]" || pip install ./backend
+          else
+            pip install "fastapi[standard]>=0.115,<1" "uvicorn[standard]>=0.30,<1" pytest
+          fi
+
+      - name: Run tests when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d tests || -d backend/tests ]]; then
+            pytest -q
+          else
+            echo "No tests directory found; skipping pytest until application source is added."
+          fi
+
+      - name: Validate Docker Compose config
+        run: docker compose config --quiet
+
+      - name: Build local container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: voice-ai:${{ github.sha }}
+
+      - name: Video workflow smoke hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/video-workflow-smoke.sh "voice-ai:${GITHUB_SHA}"

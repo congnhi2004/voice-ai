@@ -1,0 +1,2 @@
+{"provider":"local","voices":[{"name":"local-vi-VN-test-voice","language_codes":["vi-VN"],"ssml_gender":"NEUTRAL","natural_sample_rate_hz":24000,"supported_encodings":["LINEAR16","MP3","OGG_OPUS"]}]}
+HTTP 200

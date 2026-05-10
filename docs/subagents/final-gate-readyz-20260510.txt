@@ -1,0 +1,2 @@
+{"status":"ready","provider":{"name":"local","ready":true,"detail":null},"storage":{"mode":"local","ready":true,"detail":null},"mlflow":{"configured":true,"ready":true,"detail":null},"video_localization":{"mode":"local","ready":true,"ffmpeg_available":true,"detail":"local demo mode can create artifacts without ffmpeg; real muxing requires ffmpeg"}}
+HTTP 200

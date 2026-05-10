@@ -1,0 +1,91 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: voice-ai:local
+    env_file:
+      - .env.example
+    environment:
+      ENVIRONMENT: local
+      PORT: "8080"
+      TTS_PROVIDER: local
+      AUDIO_STORAGE_DIR: /app/data/audio
+      VIDEO_STORAGE_DIR: /app/data/video
+      ARTIFACT_STORAGE_DIR: /app/data/artifacts
+      AUDIO_BASE_URL: http://localhost:8080/audio
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      VIDEO_LOCALIZATION_ENABLED: "true"
+      JOB_DISPATCH_MODE: inline
+      FFMPEG_THREADS: "2"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/audio:/app/data/audio
+      - ./data/video:/app/data/video
+      - ./data/artifacts:/app/data/artifacts
+      - ./logs:/app/logs
+    depends_on:
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.12.0
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --default-artifact-root
+      - /mlflow/artifacts
+      - --serve-artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlflow
+      - ./artifacts/mlflow:/mlflow/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).read()\nPY"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    profiles:
+      - worker
+    image: voice-ai:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      ENVIRONMENT: local
+      TTS_PROVIDER: local
+      JOB_DISPATCH_MODE: worker
+      AUDIO_STORAGE_DIR: /app/data/audio
+      VIDEO_STORAGE_DIR: /app/data/video
+      ARTIFACT_STORAGE_DIR: /app/data/artifacts
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      FFMPEG_THREADS: "2"
+      WORKER_CONCURRENCY: "1"
+    command: ["sh", "-c", "${WORKER_COMMAND:-python -m app.worker}"]
+    volumes:
+      - ./data/audio:/app/data/audio
+      - ./data/video:/app/data/video
+      - ./data/artifacts:/app/data/artifacts
+      - ./logs:/app/logs
+    depends_on:
+      mlflow:
+        condition: service_started
