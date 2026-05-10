@@ -22,6 +22,7 @@ def make_client(tmp_path: Path, **overrides) -> TestClient:
         audio_storage_dir=tmp_path / "audio",
         video_jobs_dir=tmp_path / "video-jobs",
         audio_base_url=overrides.pop("audio_base_url", "http://testserver"),
+        auth_storage_path=overrides.pop("auth_storage_path", tmp_path / "auth-billing.sqlite3"),
         api_keys=overrides.pop("api_keys", ()),
         max_input_chars=overrides.pop("max_input_chars", 5000),
         mlflow_tracking_uri=overrides.pop("mlflow_tracking_uri", None),
@@ -127,6 +128,33 @@ class FakeOpenAIClient:
             },
         )()
         self.responses = responses or FakeResponses()
+
+
+class FakeGCSBlob:
+    def __init__(self, bucket_name: str, name: str, uploads: dict[str, dict]):
+        self.bucket_name = bucket_name
+        self.name = name
+        self.uploads = uploads
+
+    def upload_from_string(self, data: bytes, content_type: str | None = None):
+        self.uploads[f"gs://{self.bucket_name}/{self.name}"] = {"data": data, "content_type": content_type}
+
+    def upload_from_filename(self, filename: str, content_type: str | None = None):
+        self.uploads[f"gs://{self.bucket_name}/{self.name}"] = {"data": Path(filename).read_bytes(), "content_type": content_type}
+
+    def generate_signed_url(self, **kwargs):
+        method = kwargs.get("method", "GET")
+        ttl = int(kwargs["expiration"].total_seconds())
+        return f"https://signed.example/{self.bucket_name}/{self.name}?method={method}&ttl={ttl}&X-Goog-Signature=fake"
+
+
+class FakeGCSBucket:
+    def __init__(self, name: str, uploads: dict[str, dict]):
+        self.name = name
+        self.uploads = uploads
+
+    def blob(self, name: str):
+        return FakeGCSBlob(self.name, name, self.uploads)
 
 
 FAKE_MP4_BYTES = b"\x00\x00\x00\x18ftypmp42demo-video"
@@ -307,6 +335,34 @@ def test_public_urls_do_not_duplicate_audio_prefix_when_env_contains_audio_mount
     )
     assert video.status_code == 400
     assert video.json()["error"]["code"] == "invalid_video_upload"
+
+
+def test_gcs_audio_storage_uploads_and_returns_signed_url(tmp_path: Path, fake_espeak_ng: list[list[str]], monkeypatch: pytest.MonkeyPatch):
+    uploads: dict[str, dict] = {}
+
+    def fake_bucket(self):
+        return FakeGCSBucket(self.bucket_name, uploads)
+
+    monkeypatch.setattr("app.storage.GCSStorage._get_bucket", fake_bucket)
+    client = make_client(
+        tmp_path,
+        storage_provider="gcs",
+        gcs_audio_bucket="voice-ai-audio-test",
+        gcs_artifact_bucket="voice-ai-artifact-test",
+        gcs_audio_prefix="voice-ai/audio-test",
+        signed_url_ttl_seconds=900,
+    )
+
+    response = client.post("/v1/synthesize", json=synth_payload(), headers={"X-Request-ID": "req_gcs_audio"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["audio_url"].startswith("https://signed.example/voice-ai-audio-test/voice-ai/audio-test/tts_")
+    assert "ttl=900" in body["audio_url"]
+    assert body["audio_path"].endswith(".wav")
+    uploaded_uri = next(uri for uri in uploads if uri.startswith("gs://voice-ai-audio-test/voice-ai/audio-test/tts_"))
+    assert uploads[uploaded_uri]["data"].startswith(b"RIFF")
+    assert uploads[uploaded_uri]["content_type"] == "audio/wav"
 
 
 def test_video_localization_rejects_fake_mp4_with_clear_contract_error(tmp_path: Path):
@@ -534,6 +590,64 @@ def test_video_localization_demo_workflow_creates_artifacts_and_status(tmp_path:
             assert download.content.startswith(b"\x00\x00\x00")
 
 
+def test_gcs_video_artifacts_upload_and_refresh_signed_urls(
+    tmp_path: Path,
+    fake_espeak_ng: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    uploads: dict[str, dict] = {}
+
+    def fake_bucket(self):
+        return FakeGCSBucket(self.bucket_name, uploads)
+
+    monkeypatch.setattr("app.storage.GCSStorage._get_bucket", fake_bucket)
+    monkeypatch.setattr("app.video_localization.validate_mp4_container", lambda path, settings: None)
+
+    def fake_render(settings, source, audio, subtitles, output):
+        output.write_bytes(b"\x00\x00\x00 fake localized mp4")
+        return None
+
+    monkeypatch.setattr("app.video_localization.render_or_copy_video", fake_render)
+    client = make_client(
+        tmp_path,
+        storage_provider="gcs",
+        gcs_audio_bucket="voice-ai-audio-test",
+        gcs_artifact_bucket="voice-ai-artifact-test",
+        gcs_audio_prefix="voice-ai/audio-test",
+        gcs_source_video_prefix="voice-ai/video/source-test",
+        gcs_intermediate_prefix="voice-ai/video/intermediate-test",
+        gcs_rendered_video_prefix="voice-ai/video/rendered-test",
+        signed_url_ttl_seconds=1200,
+    )
+
+    response = client.post(
+        "/v1/video-localization/jobs",
+        data={"source_language": "en-US", "target_language": "vi"},
+        files={"file": ("sample.mp4", FAKE_MP4_BYTES, "video/mp4")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    source = next(artifact for artifact in body["artifacts"] if artifact["kind"] == "source_video")
+    rendered = next(artifact for artifact in body["artifacts"] if artifact["kind"] == "localized_video")
+    transcript = next(artifact for artifact in body["artifacts"] if artifact["kind"] == "transcript")
+    assert source["path"].startswith("gs://voice-ai-artifact-test/voice-ai/video/source-test/")
+    assert rendered["path"].startswith("gs://voice-ai-artifact-test/voice-ai/video/rendered-test/")
+    assert transcript["path"].startswith("gs://voice-ai-artifact-test/voice-ai/video/intermediate-test/")
+    assert all(artifact["url"].startswith("https://signed.example/voice-ai-artifact-test/") for artifact in body["artifacts"])
+    assert any(uri.startswith("gs://voice-ai-artifact-test/voice-ai/video/source-test/") for uri in uploads)
+    assert any(uri.startswith("gs://voice-ai-artifact-test/voice-ai/video/rendered-test/") for uri in uploads)
+
+    status_response = client.get(f"/v1/video-localization/jobs/{body['job_id']}")
+    assert status_response.status_code == 200
+    assert "ttl=1200" in status_response.json()["artifacts"][0]["url"]
+
+    filename = rendered["path"].rsplit("/", 1)[-1]
+    redirect = client.get(f"/v1/video-localization/jobs/{body['job_id']}/artifacts/{filename}", follow_redirects=False)
+    assert redirect.status_code == 307
+    assert redirect.headers["location"].startswith("https://signed.example/voice-ai-artifact-test/")
+
+
 def test_video_localization_auto_uses_openai_pipeline_when_key_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     speech = FakeSpeech(content=b"RIFFmock-openai-video-vietnamese-speech")
     transcriptions = FakeTranscriptions(text="Welcome to the product demo.")
@@ -676,6 +790,9 @@ def test_openapi_includes_tts_and_video_paths(tmp_path: Path):
     assert "/v1/product/plans" in schema["paths"]
     assert "/v1/product/capabilities" in schema["paths"]
     assert "/v1/demo/workspace" in schema["paths"]
+    assert "/v1/billing/checkout-session" in schema["paths"]
+    assert "/v1/billing/customer-portal" in schema["paths"]
+    assert "/v1/billing/stripe-webhook" in schema["paths"]
 
 
 def test_public_product_and_demo_workspace_endpoints(tmp_path: Path):
@@ -684,16 +801,17 @@ def test_public_product_and_demo_workspace_endpoints(tmp_path: Path):
     plans = client.get("/v1/product/plans")
     assert plans.status_code == 200
     plans_body = plans.json()
-    assert plans_body["billing"] == {"production_billing": False, "demo_only": True}
-    assert plans_body["plans"][0]["id"] == "demo-free"
-    assert plans_body["plans"][0]["demo_only"] is True
+    assert plans_body["billing"]["production_billing"] is False
+    assert plans_body["billing"]["mode"] == "not-configured"
+    assert plans_body["plans"][0]["id"] == "free"
+    assert plans_body["plans"][0]["demo_only"] is False
 
     capabilities = client.get("/v1/product/capabilities")
     assert capabilities.status_code == 200
     capabilities_body = capabilities.json()
     assert capabilities_body["tts"]["available"] is True
     assert capabilities_body["video_localization"]["target_languages"] == ["vi", "vi-VN"]
-    assert capabilities_body["auth"]["mode"] == "local-demo"
+    assert capabilities_body["auth"]["mode"] == "jwt-password"
     assert capabilities_body["billing"]["production_billing"] is False
 
     workspace = client.get("/v1/demo/workspace")
@@ -705,25 +823,24 @@ def test_public_product_and_demo_workspace_endpoints(tmp_path: Path):
     assert workspace_body["video_jobs_available"] is True
 
 
-def test_demo_auth_register_login_me_logout(tmp_path: Path):
+def test_auth_register_login_me_logout_uses_jwt_and_hash_storage(tmp_path: Path):
     client = make_client(tmp_path)
     credentials = {"email": "User@Example.com", "password": "local-demo-pass", "name": "Demo User"}
 
     registered = client.post("/v1/auth/register", json=credentials)
     assert registered.status_code == 200
     registered_body = registered.json()
-    assert registered_body["demo_only"] is True
     assert registered_body["user"]["email"] == "user@example.com"
-    assert registered_body["access_token"].startswith("demo_")
+    assert registered_body["access_token"].count(".") == 2
     assert "password" not in registered.text
 
     duplicate = client.post("/v1/auth/register", json=credentials)
     assert duplicate.status_code == 409
-    assert duplicate.json()["error"]["code"] == "demo_user_exists"
+    assert duplicate.json()["error"]["code"] == "user_exists"
 
     bad_login = client.post("/v1/auth/login", json={"email": "user@example.com", "password": "wrong-pass"})
     assert bad_login.status_code == 401
-    assert bad_login.json()["error"]["code"] == "invalid_demo_credentials"
+    assert bad_login.json()["error"]["code"] == "invalid_credentials"
 
     login = client.post("/v1/auth/login", json={"email": "user@example.com", "password": "local-demo-pass"})
     assert login.status_code == 200
@@ -735,8 +852,116 @@ def test_demo_auth_register_login_me_logout(tmp_path: Path):
 
     logout = client.post("/v1/auth/logout", headers={"Authorization": f"Bearer {token}"})
     assert logout.status_code == 200
-    assert logout.json() == {"logged_out": True, "demo_only": True}
+    assert logout.json() == {"logged_out": True}
 
     after_logout = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert after_logout.status_code == 401
-    assert after_logout.json()["error"]["code"] == "invalid_demo_token"
+    assert after_logout.json()["error"]["code"] == "invalid_bearer_token"
+
+    db_text = (tmp_path / "auth-billing.sqlite3").read_bytes()
+    assert b"local-demo-pass" not in db_text
+
+
+def test_production_auth_requires_jwt_secret(tmp_path: Path):
+    client = make_client(tmp_path, environment="production")
+
+    response = client.post("/v1/auth/register", json={"email": "prod@example.com", "password": "prod-pass-123"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "auth_not_configured"
+
+
+def test_billing_checkout_not_configured_returns_503(tmp_path: Path):
+    client = make_client(tmp_path)
+    token = client.post("/v1/auth/register", json={"email": "bill@example.com", "password": "billing-pass-123"}).json()["access_token"]
+
+    response = client.post("/v1/billing/checkout-session", json={"plan_id": "starter"}, headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "billing_not_configured"
+
+
+def test_billing_checkout_and_portal_use_mocked_stripe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeStripeBillingClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def require_configured(self):
+            return None
+
+        def create_customer(self, *, email: str, name: str | None, user_id: str) -> str:
+            return "cus_test_123"
+
+        def create_checkout_session(self, *, customer_id: str, price_id: str, plan_id: str, user_id: str):
+            assert customer_id == "cus_test_123"
+            assert price_id == "price_starter"
+            assert plan_id == "starter"
+            return "https://checkout.stripe.test/session", "cs_test_123"
+
+        def create_portal_session(self, *, customer_id: str):
+            assert customer_id == "cus_test_123"
+            return "https://billing.stripe.test/session", "bps_test_123"
+
+    monkeypatch.setattr("app.main.StripeBillingClient", FakeStripeBillingClient)
+    client = make_client(
+        tmp_path,
+        stripe_secret_key="sk_test_mock",
+        stripe_webhook_secret="whsec_mock",
+        stripe_success_url="https://example.com/success",
+        stripe_cancel_url="https://example.com/cancel",
+        stripe_portal_return_url="https://example.com/account",
+        stripe_price_starter="price_starter",
+    )
+    token = client.post("/v1/auth/register", json={"email": "pay@example.com", "password": "billing-pass-123"}).json()["access_token"]
+
+    checkout = client.post("/v1/billing/checkout-session", json={"plan_id": "starter"}, headers={"Authorization": f"Bearer {token}"})
+    assert checkout.status_code == 200
+    assert checkout.json() == {"url": "https://checkout.stripe.test/session", "session_id": "cs_test_123"}
+
+    portal = client.post("/v1/billing/customer-portal", headers={"Authorization": f"Bearer {token}"})
+    assert portal.status_code == 200
+    assert portal.json() == {"url": "https://billing.stripe.test/session", "session_id": "bps_test_123"}
+
+
+def test_stripe_webhook_verifies_signature_and_provisions_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeStripeBillingClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def construct_event(self, *, payload: bytes, signature: str):
+            assert payload == b'{"ignored": true}'
+            assert signature == "t=123,v1=abc"
+            return {
+                "id": "evt_test_123",
+                "type": "checkout.session.completed",
+                "data": {
+                    "object": {
+                        "customer": "cus_test_123",
+                        "subscription": "sub_test_123",
+                        "metadata": {"plan_id": "starter"},
+                    }
+                },
+            }
+
+    monkeypatch.setattr("app.main.StripeBillingClient", FakeStripeBillingClient)
+    client = make_client(
+        tmp_path,
+        stripe_secret_key="sk_test_mock",
+        stripe_webhook_secret="whsec_mock",
+        stripe_success_url="https://example.com/success",
+        stripe_cancel_url="https://example.com/cancel",
+        stripe_portal_return_url="https://example.com/account",
+        stripe_price_starter="price_starter",
+    )
+    token = client.post("/v1/auth/register", json={"email": "hook@example.com", "password": "billing-pass-123"}).json()["access_token"]
+    user = client.app.state.auth_service.user_from_token(token)
+    client.app.state.auth_store.set_stripe_customer(user.id, "cus_test_123")
+
+    response = client.post("/v1/billing/stripe-webhook", content=b'{"ignored": true}', headers={"Stripe-Signature": "t=123,v1=abc"})
+
+    assert response.status_code == 200
+    assert response.json()["event_type"] == "checkout.session.completed"
+    subscription = client.get("/v1/billing/subscription", headers={"Authorization": f"Bearer {token}"})
+    assert subscription.status_code == 200
+    assert subscription.json()["plan_id"] == "starter"
+    assert subscription.json()["subscription_status"] == "active"

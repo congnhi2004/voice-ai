@@ -10,16 +10,36 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .auth_billing import (
+    AuthBillingError,
+    AuthBillingStore,
+    AuthNotConfiguredError,
+    AuthService,
+    BillingNotConfiguredError,
+    BillingService,
+    StripeBillingClient,
+)
 from .config import Settings, load_settings
-from .frontend_support import DemoAuthStore, capabilities, demo_workspace_status, pricing_plans
+from .frontend_support import capabilities, demo_workspace_status, pricing_plans
 from .logging_config import configure_logging
-from .models import AudioInfo, DemoAuthRequest, DemoLoginRequest, ObservabilityInfo, ProviderInfo, SynthesizeRequest, SynthesizeResponse
+from .models import (
+    AudioInfo,
+    AuthLoginRequest,
+    AuthRegisterRequest,
+    BillingSessionResponse,
+    CheckoutSessionRequest,
+    ObservabilityInfo,
+    ProviderInfo,
+    SubscriptionState,
+    SynthesizeRequest,
+    SynthesizeResponse,
+)
 from .observability import MlflowTracker
 from .providers import UnsupportedVoiceError, build_provider
-from .storage import LocalAudioStorage
+from .storage import build_artifact_storage, build_audio_storage
 from .video_localization import (
     OPENAI_AUDIO_UPLOAD_LIMIT_BYTES,
     VideoJobStore,
@@ -53,19 +73,25 @@ def problem(code: str, message: str, request_id: str, status_code: int, details:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(settings.log_level)
-    storage = LocalAudioStorage(settings)
+    storage = build_audio_storage(settings)
+    artifact_storage = build_artifact_storage(settings)
     provider = build_provider(settings)
     tracker = MlflowTracker(settings)
     video_store = VideoJobStore(settings)
-    demo_auth_store = DemoAuthStore()
+    auth_store = AuthBillingStore(settings.auth_storage_path)
+    auth_service = AuthService(settings, auth_store)
+    billing_service = BillingService(settings, auth_store, StripeBillingClient(settings))
 
     app = FastAPI(title="Voice AI TTS API", version=settings.version)
     app.state.settings = settings
     app.state.storage = storage
+    app.state.artifact_storage = artifact_storage
     app.state.provider = provider
     app.state.tracker = tracker
     app.state.video_store = video_store
-    app.state.demo_auth_store = demo_auth_store
+    app.state.auth_store = auth_store
+    app.state.auth_service = auth_service
+    app.state.billing_service = billing_service
 
     app.add_middleware(
         CORSMiddleware,
@@ -121,6 +147,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return authorization.split(" ", 1)[1].strip()
         return None
 
+    async def current_user(authorization: str | None = Header(default=None)):
+        token = bearer_token(authorization)
+        if not token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "missing_bearer_token", "message": "Bearer token is required."})
+        try:
+            user = auth_service.user_from_token(token)
+        except AuthNotConfiguredError as exc:
+            raise HTTPException(status_code=503, detail={"code": "auth_not_configured", "message": str(exc)}) from exc
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "invalid_bearer_token", "message": "Bearer token is invalid or expired."})
+        return user
+
     @app.exception_handler(HTTPException)
     async def http_error_handler(request: Request, exc: HTTPException):
         detail = exc.detail if isinstance(exc.detail, dict) else {"code": "http_error", "message": str(exc.detail)}
@@ -146,7 +184,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/product/plans")
     async def product_plans():
-        return {"plans": [plan.model_dump() for plan in pricing_plans()], "billing": {"production_billing": False, "demo_only": True}}
+        return {
+            "plans": [plan.model_dump() for plan in pricing_plans(settings)],
+            "billing": {
+                "production_billing": settings.stripe_configured,
+                "mode": "stripe-subscriptions" if settings.stripe_configured else "not-configured",
+                "checkout_available": settings.stripe_configured,
+            },
+        }
 
     @app.get("/v1/product/capabilities")
     async def product_capabilities():
@@ -157,35 +202,79 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return demo_workspace_status(settings, ffmpeg_available=shutil.which(settings.ffmpeg_path) is not None)
 
     @app.post("/v1/auth/register")
-    async def demo_register(payload: DemoAuthRequest):
+    async def register(payload: AuthRegisterRequest):
         try:
-            return demo_auth_store.register(email=payload.email, password=payload.password, name=payload.name)
-        except ValueError:
-            return problem("demo_user_exists", "A demo user already exists for this email.", request_id_var.get(), 409)
+            user, token = auth_service.register(email=payload.email, password=payload.password, name=payload.name)
+            return {"user": user.model_dump(), "access_token": token, "token_type": "bearer", "expires_in": settings.auth_access_token_expire_minutes * 60}
+        except AuthNotConfiguredError as exc:
+            return problem("auth_not_configured", str(exc), request_id_var.get(), 503)
+        except AuthBillingError:
+            return problem("user_exists", "A user already exists for this email.", request_id_var.get(), 409)
 
     @app.post("/v1/auth/login")
-    async def demo_login(payload: DemoLoginRequest):
+    async def login(payload: AuthLoginRequest):
         try:
-            return demo_auth_store.login(email=payload.email, password=payload.password)
-        except ValueError:
-            return problem("invalid_demo_credentials", "Invalid demo credentials.", request_id_var.get(), 401)
+            result = auth_service.login(email=payload.email, password=payload.password)
+        except AuthNotConfiguredError as exc:
+            return problem("auth_not_configured", str(exc), request_id_var.get(), 503)
+        if result is None:
+            return problem("invalid_credentials", "Invalid email or password.", request_id_var.get(), 401)
+        user, token = result
+        return {"user": user.model_dump(), "access_token": token, "token_type": "bearer", "expires_in": settings.auth_access_token_expire_minutes * 60}
 
     @app.post("/v1/auth/logout")
-    async def demo_logout(authorization: str | None = Header(default=None)):
+    async def logout(authorization: str | None = Header(default=None)):
         token = bearer_token(authorization)
         if not token:
-            return problem("missing_demo_token", "Demo bearer token is required.", request_id_var.get(), 401)
-        return {"logged_out": demo_auth_store.logout(token), "demo_only": True}
+            return problem("missing_bearer_token", "Bearer token is required.", request_id_var.get(), 401)
+        try:
+            logged_out = auth_service.revoke_token(token)
+        except AuthNotConfiguredError as exc:
+            return problem("auth_not_configured", str(exc), request_id_var.get(), 503)
+        if not logged_out:
+            return problem("invalid_bearer_token", "Bearer token is invalid or expired.", request_id_var.get(), 401)
+        return {"logged_out": True}
 
     @app.get("/v1/auth/me")
-    async def demo_me(authorization: str | None = Header(default=None)):
-        token = bearer_token(authorization)
-        if not token:
-            return problem("missing_demo_token", "Demo bearer token is required.", request_id_var.get(), 401)
-        user = demo_auth_store.me(token)
-        if not user:
-            return problem("invalid_demo_token", "Demo bearer token is invalid or expired.", request_id_var.get(), 401)
-        return {"user": user.model_dump(), "demo_only": True}
+    async def me(user=Depends(current_user)):
+        return {"user": user.public().model_dump()}
+
+    @app.get("/v1/billing/subscription", response_model=SubscriptionState)
+    async def billing_subscription(user=Depends(current_user)):
+        return user.subscription()
+
+    @app.post("/v1/billing/checkout-session", response_model=BillingSessionResponse)
+    async def create_checkout_session(payload: CheckoutSessionRequest, user=Depends(current_user)):
+        try:
+            url, session_id = billing_service.create_checkout_session(user=user, plan_id=payload.plan_id)
+            return BillingSessionResponse(url=url, session_id=session_id)
+        except BillingNotConfiguredError as exc:
+            return problem("billing_not_configured", str(exc), request_id_var.get(), 503)
+        except AuthBillingError as exc:
+            code = str(exc) or "billing_error"
+            return problem(code, "Requested plan cannot be billed.", request_id_var.get(), 400)
+
+    @app.post("/v1/billing/customer-portal", response_model=BillingSessionResponse)
+    async def create_customer_portal(user=Depends(current_user)):
+        try:
+            url, session_id = billing_service.create_portal_session(user=user)
+            return BillingSessionResponse(url=url, session_id=session_id)
+        except BillingNotConfiguredError as exc:
+            return problem("billing_not_configured", str(exc), request_id_var.get(), 503)
+        except AuthBillingError:
+            return problem("missing_stripe_customer", "No Stripe customer is linked to this user yet.", request_id_var.get(), 409)
+
+    @app.post("/v1/billing/stripe-webhook")
+    async def stripe_webhook(request: Request, stripe_signature: str | None = Header(default=None, alias="Stripe-Signature")):
+        if not stripe_signature:
+            return problem("missing_stripe_signature", "Stripe-Signature header is required.", request_id_var.get(), 400)
+        payload = await request.body()
+        try:
+            return billing_service.handle_webhook(payload=payload, signature=stripe_signature)
+        except BillingNotConfiguredError as exc:
+            return problem("billing_not_configured", str(exc), request_id_var.get(), 503)
+        except Exception:
+            return problem("invalid_stripe_webhook", "Stripe webhook payload or signature is invalid.", request_id_var.get(), 400)
 
     @app.get("/readyz")
     async def readyz():
@@ -196,7 +285,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = {
             "status": "ready" if ready else "not_ready",
             "provider": {"name": provider_health.name, "ready": provider_health.ready, "detail": provider_health.detail},
-            "storage": {"mode": "local", "ready": storage_ready, "detail": storage_detail},
+            "storage": {"mode": settings.audio_storage_provider, "ready": storage_ready, "detail": storage_detail},
             "mlflow": {"configured": mlflow_configured, "ready": mlflow_ready, "detail": mlflow_detail},
             "video_localization": {
                 "mode": settings.localization_provider,
@@ -366,6 +455,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 uploaded_bytes=uploaded_bytes,
                 source_language=source_language,
                 voice_name=voice_name,
+                artifact_storage=artifact_storage,
             )
             logger.info(
                 "video_localization_completed",
@@ -406,12 +496,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         status_body = video_store.load_status(job_id)
         if status_body is None:
             return problem("job_not_found", "Video localization job was not found.", request_id_var.get(), 404, {"job_id": job_id})
+        if artifact_storage is not None:
+            status_body = status_body.model_copy(
+                update={
+                    "artifacts": [
+                        artifact.model_copy(update={"url": artifact_storage.signed_url(artifact.path.removeprefix(f"gs://{artifact_storage.bucket_name}/"))})
+                        if artifact.path.startswith(f"gs://{artifact_storage.bucket_name}/")
+                        else artifact
+                        for artifact in status_body.artifacts
+                    ]
+                }
+            )
         return status_body
 
     @app.get("/v1/video-localization/jobs/{job_id}/artifacts/{filename}", dependencies=[Depends(require_api_key)])
     async def get_video_localization_artifact(job_id: str, filename: str):
         from fastapi.responses import FileResponse
 
+        status_body = video_store.load_status(job_id)
+        if artifact_storage is not None and status_body is not None:
+            for artifact in status_body.artifacts:
+                if artifact.path.rsplit("/", 1)[-1] == filename and artifact.path.startswith(f"gs://{artifact_storage.bucket_name}/"):
+                    object_name = artifact.path.removeprefix(f"gs://{artifact_storage.bucket_name}/")
+                    return RedirectResponse(url=artifact_storage.signed_url(object_name), status_code=307)
         try:
             path = video_store.artifact_path(job_id, filename)
         except ValueError:

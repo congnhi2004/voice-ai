@@ -37,6 +37,48 @@ test.beforeEach(async ({ page }) => {
   await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/voices/, async (route) => {
     await route.fulfill({ json: voiceResponse });
   });
+
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/product\/capabilities/, async (route) => {
+    await route.fulfill({
+      json: {
+        service: "voice-ai",
+        environment: "local",
+        mode: "demo",
+        tts: { available: true, providers: ["local"], active_provider: "local", encodings: ["MP3"], local_fallback: true },
+        video_localization: { available: true, source_languages: ["en-US", "zh-CN"], target_languages: ["vi"], demo_mode: true },
+        auth: { available: true, mode: "local-demo", production_identity: false },
+        billing: { available: false, mode: "pricing-copy-only", production_billing: false }
+      }
+    });
+  });
+
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/product\/plans/, async (route) => {
+    await route.fulfill({
+      json: {
+        plans: [
+          {
+            id: "demo-free",
+            name: "Demo Free",
+            monthly_price_usd: 0,
+            included_minutes: 20,
+            features: [{ key: "tts", label: "Short TTS previews" }],
+            demo_only: true
+          },
+          {
+            id: "starter-placeholder",
+            name: "Starter Placeholder",
+            monthly_price_usd: 49,
+            included_minutes: 500,
+            overage_price_usd_per_minute: 0.18,
+            features: [{ key: "api", label: "API access" }],
+            recommended: true,
+            demo_only: true
+          }
+        ],
+        billing: { production_billing: false, demo_only: true, mode: "pricing-copy-only" }
+      }
+    });
+  });
 });
 
 test("TTS flow renders output and captures desktop evidence", async ({ page }, testInfo) => {
@@ -204,4 +246,77 @@ test("video upload validation blocks unsupported files before hitting backend", 
   await page.getByRole("button", { name: "Start Vietnamese localization", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Upload a Chinese or English video");
   expect(backendCalled).toBe(false);
+});
+
+test("auth and billing panel expose session state with billing disabled", async ({ page }) => {
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/auth\/register/, async (route) => {
+    await route.fulfill({
+      json: {
+        access_token: "demo_token_123",
+        user: { id: "user_123", email: "creator@example.com", plan_id: "demo-free", subscription_status: "demo" }
+      }
+    });
+  });
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/auth\/me/, async (route) => {
+    await route.fulfill({
+      json: { user: { id: "user_123", email: "creator@example.com", plan_id: "demo-free", subscription_status: "demo" } }
+    });
+  });
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/billing\/subscription/, async (route) => {
+    await route.fulfill({ status: 404, json: { error: { message: "Billing not configured", code: "billing_not_configured" } } });
+  });
+
+  await page.goto("/");
+  const navSignupButton = page.locator("button#signup-button");
+  await expect(navSignupButton).toHaveAccessibleName("Sign up");
+  await navSignupButton.click();
+  await page.getByLabel("Email").fill("creator@example.com");
+  await page.getByLabel("Password").fill("correct-horse");
+  await page.getByRole("button", { name: "Create account" }).click();
+
+  const accountBillingPanel = page.getByLabel("Account and billing");
+  await expect(accountBillingPanel.getByText("creator@example.com")).toBeVisible();
+  await expect(accountBillingPanel.getByText("local-demo")).toBeVisible();
+  await expect(accountBillingPanel.getByRole("button", { name: "Manage billing" })).toBeDisabled();
+  const starterPricingCard = page.locator(".pricing-card", { hasText: "Starter Placeholder" });
+  await expect(starterPricingCard.getByText("Action unavailable")).toBeVisible();
+  await expect(starterPricingCard.getByRole("button", { name: "Checkout disabled" })).toBeDisabled();
+});
+
+test("pricing selection calls checkout when billing capability is enabled", async ({ page }) => {
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/product\/capabilities/, async (route) => {
+    await route.fulfill({
+      json: {
+        service: "voice-ai",
+        mode: "production",
+        auth: { available: true, mode: "session", production_identity: true },
+        billing: { available: true, mode: "stripe", production_billing: true, checkout_available: true, portal_available: true, stripe_configured: true }
+      }
+    });
+  });
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/auth\/register/, async (route) => {
+    await route.fulfill({ json: { access_token: "prod_token_123", user: { email: "buyer@example.com" } } });
+  });
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/auth\/me/, async (route) => {
+    await route.fulfill({ json: { user: { email: "buyer@example.com", plan_id: "starter-placeholder", subscription_status: "trialing" } } });
+  });
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/billing\/subscription/, async (route) => {
+    await route.fulfill({ json: { status: "trialing", plan_id: "starter-placeholder", entitlement_status: "active" } });
+  });
+  await page.route(/http:\/\/(localhost|127\.0\.0\.1):8080\/v1\/billing\/checkout/, async (route) => {
+    const body = route.request().postDataJSON() as { plan_id?: string };
+    expect(body.plan_id).toBe("starter-placeholder");
+    await route.fulfill({ json: { url: "/checkout-test?session_id=cs_test_123" } });
+  });
+
+  await page.goto("/");
+  const navSignupButton = page.locator("button#signup-button");
+  await expect(navSignupButton).toHaveAccessibleName("Sign up");
+  await navSignupButton.click();
+  await page.getByLabel("Email").fill("buyer@example.com");
+  await page.getByLabel("Password").fill("correct-horse");
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.getByLabel("Account and billing").getByText("Stripe billing ready")).toBeVisible();
+  await page.locator(".pricing-card", { hasText: "Starter Placeholder" }).getByRole("button", { name: "Choose plan" }).click();
+  await expect(page).toHaveURL(/checkout-test/);
 });

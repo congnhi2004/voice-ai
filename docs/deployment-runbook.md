@@ -17,14 +17,22 @@ Environment variables:
 - `GOOGLE_APPLICATION_CREDENTIALS`: local development credential path when not using service identity.
 - `GCP_PROJECT_ID`: Google Cloud project id.
 - `MLFLOW_TRACKING_URI`: MLflow tracking backend URI.
+- `STORAGE_PROVIDER`: `local` for development or `gcs` to use Cloud Storage for both generated audio and video artifacts.
+- `AUDIO_STORAGE_MODE`: optional per-surface override, normally matches `STORAGE_PROVIDER`.
 - `AUDIO_STORAGE_DIR`: local audio directory, default `./data/audio`.
 - `AUDIO_BASE_URL`: base URL for returned audio links.
+- `VIDEO_STORAGE_MODE`: optional per-surface override, normally matches `STORAGE_PROVIDER`.
+- `GCS_AUDIO_BUCKET`: private bucket for generated TTS audio when GCS storage is enabled.
+- `GCS_ARTIFACT_BUCKET`: private bucket for source video, intermediate files, subtitles, voiceover audio, and rendered video when GCS storage is enabled.
+- `GCS_AUDIO_PREFIX`, `GCS_SOURCE_VIDEO_PREFIX`, `GCS_INTERMEDIATE_PREFIX`, `GCS_RENDERED_VIDEO_PREFIX`: object prefixes for generated artifacts.
+- `SIGNED_URL_TTL_SECONDS`: signed URL lifetime for download links, default `3600`.
 - `API_KEYS`: comma-separated MVP API keys or secret-expanded value.
 - `CORS_ALLOW_ORIGINS`: comma-separated allowed origins.
 - `MAX_INPUT_CHARS`: default `5000`.
 - `LOG_LEVEL`: default `INFO`.
 
 Production should use Cloud Run service identity and Secret Manager rather than mounting service account JSON files.
+For GCS storage, keep buckets private and grant the Cloud Run runtime service account object access only to the required buckets. Local tests mock the GCS client and should not require live credentials.
 
 ## Local Run
 
@@ -88,6 +96,7 @@ export REGION=us-central1
 export ENVIRONMENT=staging
 export SERVICE_NAME=voice-ai
 export CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=voice-ai-run@my-project.iam.gserviceaccount.com
+export STORAGE_PROVIDER=gcs
 export GCS_AUDIO_BUCKET=my-voice-ai-audio
 export GCS_ARTIFACT_BUCKET=my-voice-ai-artifacts
 export API_KEYS_SECRET_NAME=voice-ai-api-keys

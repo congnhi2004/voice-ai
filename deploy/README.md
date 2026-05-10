@@ -99,6 +99,7 @@ export ENVIRONMENT=staging
 export SERVICE_NAME=voice-ai
 export ARTIFACT_REPOSITORY=voice-ai
 export CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT=voice-ai-run@my-project.iam.gserviceaccount.com
+export STORAGE_PROVIDER=gcs
 export GCS_AUDIO_BUCKET=my-voice-ai-audio
 export GCS_ARTIFACT_BUCKET=my-voice-ai-artifacts
 export API_KEYS_SECRET_NAME=voice-ai-api-keys
@@ -127,7 +128,7 @@ gcloud storage buckets update "gs://${GCS_ARTIFACT_BUCKET}" \
   --lifecycle-file=deploy/gcs-video-artifact-lifecycle.json
 ```
 
-Signed URLs should be time limited and generated for specific objects. Google Cloud Storage signed URLs grant access to whoever has the URL until expiration, so use short TTLs for user downloads and never log full URLs in structured logs. The app config uses `SIGNED_URL_TTL_SECONDS=3600` as the production default.
+Set `STORAGE_PROVIDER=gcs` or the per-surface `AUDIO_STORAGE_MODE=gcs` and `VIDEO_STORAGE_MODE=gcs` values for production artifact delivery. Signed URLs should be time limited and generated for specific objects. Google Cloud Storage signed URLs grant access to whoever has the URL until expiration, so use short TTLs for user downloads and never log full URLs in structured logs. The app config uses `SIGNED_URL_TTL_SECONDS=3600` as the production default.
 
 Keep source video, intermediate files, rendered video, and generated audio in private buckets/prefixes. Public access should come through application authorization plus signed URLs, not public bucket ACLs.
 

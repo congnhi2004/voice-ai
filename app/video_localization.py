@@ -20,6 +20,7 @@ from .models import (
 )
 from .observability import MlflowTracker
 from .providers import OpenAITTSProvider, TTSProvider
+from .storage import GCSStorage, join_object_name
 
 
 OPENAI_AUDIO_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024
@@ -261,7 +262,18 @@ def write_subtitles(job_dir: Path, segments: list[SubtitleSegment]) -> tuple[Pat
     return srt_path, vtt_path
 
 
-def artifact(settings: Settings, job_id: str, kind: str, path: Path, content_type: str) -> VideoArtifact:
+def artifact(settings: Settings, job_id: str, kind: str, path: Path, content_type: str, artifact_storage: GCSStorage | None = None) -> VideoArtifact:
+    if artifact_storage is not None:
+        object_name = video_object_name(settings, job_id, kind, path.name)
+        stored = artifact_storage.upload_file(path, object_name, content_type)
+        return VideoArtifact(
+            kind=kind,
+            path=stored.path,
+            url=stored.url,
+            bytes=stored.bytes,
+            checksum_sha256=stored.checksum_sha256,
+            content_type=stored.content_type,
+        )
     return VideoArtifact(
         kind=kind,
         path=str(path),
@@ -270,6 +282,16 @@ def artifact(settings: Settings, job_id: str, kind: str, path: Path, content_typ
         checksum_sha256=checksum(path),
         content_type=content_type,
     )
+
+
+def video_object_name(settings: Settings, job_id: str, kind: str, filename: str) -> str:
+    if kind == "source_video":
+        prefix = settings.gcs_source_video_prefix
+    elif kind == "localized_video":
+        prefix = settings.gcs_rendered_video_prefix
+    else:
+        prefix = settings.gcs_intermediate_prefix
+    return join_object_name(prefix, f"{job_id}/{filename}")
 
 
 def _ffprobe_path(settings: Settings) -> str | None:
@@ -508,6 +530,7 @@ def localize_video(
     uploaded_bytes: bytes,
     source_language: str,
     voice_name: str | None,
+    artifact_storage: GCSStorage | None = None,
 ) -> VideoLocalizationStatus:
     started = time.perf_counter()
     job_dir = store.job_dir(job_id)
@@ -562,17 +585,17 @@ def localize_video(
 
     latency_ms = max(1, int((time.perf_counter() - started) * 1000))
     artifacts = [
-        artifact(settings, job_id, "source_video", source_path, input_content_type or "video/mp4"),
+        artifact(settings, job_id, "source_video", source_path, input_content_type or "video/mp4", artifact_storage),
         *(
-            [artifact(settings, job_id, "source_audio", extracted_audio_path, "audio/mpeg")]
+            [artifact(settings, job_id, "source_audio", extracted_audio_path, "audio/mpeg", artifact_storage)]
             if provider.name != "local"
             else []
         ),
-        artifact(settings, job_id, "transcript", transcript_path, "application/json"),
-        artifact(settings, job_id, "subtitles_srt", srt_path, "application/x-subrip"),
-        artifact(settings, job_id, "subtitles_vtt", vtt_path, "text/vtt"),
-        artifact(settings, job_id, "voiceover_audio", audio_path, "audio/wav"),
-        artifact(settings, job_id, "localized_video", output_video, "video/mp4"),
+        artifact(settings, job_id, "transcript", transcript_path, "application/json", artifact_storage),
+        artifact(settings, job_id, "subtitles_srt", srt_path, "application/x-subrip", artifact_storage),
+        artifact(settings, job_id, "subtitles_vtt", vtt_path, "text/vtt", artifact_storage),
+        artifact(settings, job_id, "voiceover_audio", audio_path, "audio/wav", artifact_storage),
+        artifact(settings, job_id, "localized_video", output_video, "video/mp4", artifact_storage),
     ]
     mlflow = tracker.track_synthesis(
         request_id=request_id,

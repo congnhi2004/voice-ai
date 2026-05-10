@@ -465,6 +465,8 @@ PM should actively review while agents run. Open public URLs, scroll desktop and
 
 Do not call a web deploy ready after only `npm run build`, container startup, or HTTP 200. A public frontend can serve HTML and still be unusable. Always open the actual public URL and capture desktop and mobile screenshots from that URL. Link the screenshots from QA and report docs, for example under `docs/subagents/`.
 
+Ghi chú UI redesign/deploy: `vite preview` ở public URL đang phục vụ `frontend/dist`, không phục vụ trực tiếp các file `frontend/src`. Sau khi sửa `frontend/src/main.ts` hoặc `frontend/src/styles.css`, phải chạy lint/build/E2E rồi restart tmux session `voice-ai-frontend` hoặc chạy `scripts/local-services.sh restart`. Xác minh public URL bằng asset hash mới, screenshot Playwright trên `http://103.27.237.252:4174/`, console không lỗi, và không có panel chồng lấn. Tránh dùng class grid tái sử dụng quá rộng để override layout container: lỗi lần này là `workspace-grid` đi cùng `workflow-lanes` làm panel output chồng lên nhau cho tới khi có override cụ thể `.workspace-grid.workflow-lanes`.
+
 If Playwright cannot launch because browser system libraries are missing and the environment has no `sudo`, use the temporary dependency workaround only to unblock visual QA:
 
 ```bash

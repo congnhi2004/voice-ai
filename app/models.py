@@ -136,7 +136,8 @@ class PricingPlan(BaseModel):
     included_minutes: int
     overage_price_usd_per_minute: float | None
     features: list[PlanFeature]
-    demo_only: bool = True
+    stripe_price_id: str | None = None
+    demo_only: bool = False
 
 
 class CapabilitiesResponse(BaseModel):
@@ -185,3 +186,47 @@ class DemoAuthResponse(BaseModel):
     token_type: str = "bearer"
     demo_only: bool = True
     warning: str = "Local demo auth only. Not production identity."
+
+
+class AuthRegisterRequest(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=8)
+    name: str | None = None
+
+
+class AuthLoginRequest(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=8)
+
+
+class AuthUser(BaseModel):
+    id: str
+    email: str
+    name: str | None = None
+    plan_id: str = "free"
+    subscription_status: str = "none"
+    stripe_customer_id: str | None = None
+
+
+class AuthTokenResponse(BaseModel):
+    user: AuthUser
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class CheckoutSessionRequest(BaseModel):
+    plan_id: str = Field(..., min_length=2)
+
+
+class BillingSessionResponse(BaseModel):
+    url: str
+    session_id: str | None = None
+
+
+class SubscriptionState(BaseModel):
+    plan_id: str = "free"
+    subscription_status: str = "none"
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
+    entitlements: dict[str, Any] = Field(default_factory=dict)

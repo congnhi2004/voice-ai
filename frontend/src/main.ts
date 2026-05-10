@@ -1,6 +1,12 @@
 import {
   ApiError,
+  AuthResponse,
+  AuthUser,
+  CheckoutSessionResponse,
+  PricingPlan,
+  ProductCapabilities,
   ReadinessResponse,
+  SubscriptionStatus,
   SynthesizeResponse,
   VideoLocalizationArtifact,
   VideoLocalizationJob,
@@ -17,7 +23,9 @@ const storageKeys = {
   baseUrl: "voice-ai.base-url",
   history: "voice-ai.history",
   videoHistory: "voice-ai.video-history",
-  demoUser: "voice-ai.demo-user"
+  demoUser: "voice-ai.demo-user",
+  sessionToken: "voice-ai.session-token",
+  authEmail: "voice-ai.auth-email"
 };
 
 function isLoopbackHost(hostname: string) {
@@ -101,6 +109,18 @@ type AppState = {
   authMode: AuthMode;
   showAuthPanel: boolean;
   demoUser: string;
+  sessionToken: string;
+  authEmail: string;
+  authUser: AuthUser | null;
+  authLoading: boolean;
+  authError: string;
+  capabilities: ProductCapabilities | null;
+  plans: PricingPlan[];
+  plansBillingMode: string;
+  subscription: SubscriptionStatus | null;
+  billingLoading: boolean;
+  billingError: string;
+  billingMessage: string;
   baseUrl: string;
   apiKey: string;
   voices: Voice[];
@@ -157,6 +177,35 @@ const fallbackVoices: Voice[] = [
   }
 ];
 
+const fallbackPlans: PricingPlan[] = [
+  {
+    id: "demo-free",
+    name: "Launch Demo",
+    monthly_price_usd: 0,
+    included_minutes: 20,
+    features: ["20 voice minutes for product checks", "TTS preview and video review states", "Disabled checkout until billing is ready"],
+    demo_only: true
+  },
+  {
+    id: "starter-placeholder",
+    name: "Studio Starter",
+    monthly_price_usd: 49,
+    included_minutes: 500,
+    overage_price_usd_per_minute: 0.18,
+    features: ["500 voice or dubbing minutes", "Transcript, SRT, audio, and MP4 exports", "Provider readiness and request metadata"],
+    demo_only: true,
+    recommended: true
+  },
+  {
+    id: "studio-placeholder",
+    name: "Production Studio",
+    monthly_price_usd: 149,
+    included_minutes: 2500,
+    features: ["2,500 localization minutes", "Script, subtitle, voice, and video package", "Billing portal when Stripe is configured"],
+    demo_only: true
+  }
+];
+
 const videoUploadLimitBytes = 250 * 1024 * 1024;
 const acceptedVideoExtensions = [".mp4", ".mov", ".webm", ".m4v"];
 
@@ -165,6 +214,18 @@ const state: AppState = {
   authMode: "register",
   showAuthPanel: false,
   demoUser: localStorage.getItem(storageKeys.demoUser) || "",
+  sessionToken: localStorage.getItem(storageKeys.sessionToken) || "",
+  authEmail: localStorage.getItem(storageKeys.authEmail) || "",
+  authUser: null,
+  authLoading: false,
+  authError: "",
+  capabilities: null,
+  plans: fallbackPlans,
+  plansBillingMode: "not checked",
+  subscription: null,
+  billingLoading: false,
+  billingError: "",
+  billingMessage: "",
   baseUrl: initialBaseUrl(),
   apiKey: "",
   voices: fallbackVoices,
@@ -175,7 +236,7 @@ const state: AppState = {
   selectedLanguage: fallbackVoices[0].language_codes[0],
   encoding: "MP3",
   mode: "text",
-  text: "Xin chao, day la ban nghe thu cua Voice AI. Hay dan kich ban ngan vao day, chon giong doc, dieu chinh toc do, roi tao tep am thanh co the nghe va tai ve ngay.",
+  text: "Xin chào, đây là bản nghe thử của Voice AI. Hãy dán kịch bản ngắn vào đây, chọn giọng đọc, điều chỉnh tốc độ, rồi tạo tệp âm thanh có thể nghe và tải về ngay.",
   speakingRate: 1,
   pitch: 0,
   volumeGainDb: 0,
@@ -203,7 +264,7 @@ if (!app) {
 }
 const root = app;
 
-const getClient = () => new VoiceAiClient({ baseUrl: state.baseUrl, apiKey: state.apiKey });
+const getClient = () => new VoiceAiClient({ baseUrl: state.baseUrl, apiKey: state.apiKey, sessionToken: state.sessionToken });
 
 function readJson<T>(key: string, fallback: T) {
   try {
@@ -223,6 +284,50 @@ function saveHistory() {
 
 function saveVideoHistory() {
   localStorage.setItem(storageKeys.videoHistory, JSON.stringify(state.videoHistory.slice(0, 12)));
+}
+
+function saveSession(token: string, email?: string) {
+  state.sessionToken = token;
+  if (token) {
+    localStorage.setItem(storageKeys.sessionToken, token);
+  } else {
+    localStorage.removeItem(storageKeys.sessionToken);
+  }
+  if (email) {
+    state.authEmail = email;
+    localStorage.setItem(storageKeys.authEmail, email);
+  }
+}
+
+function normalizeAuthResponse(response: AuthResponse | AuthUser): { token: string; user: AuthUser | null } {
+  const maybeAuth = response as AuthResponse;
+  return {
+    token: maybeAuth.access_token || maybeAuth.token || maybeAuth.session_token || "",
+    user: maybeAuth.user || (response as AuthUser) || null
+  };
+}
+
+function authModeLabel() {
+  const auth = state.capabilities?.auth;
+  if (!auth) return "checking auth";
+  if (!auth.available) return "auth unavailable";
+  return auth.production_identity ? "production identity" : auth.mode || "demo identity";
+}
+
+function billingAvailable() {
+  const billing = state.capabilities?.billing;
+  return Boolean(billing?.available && (billing.production_billing || billing.checkout_available || billing.stripe_configured));
+}
+
+function billingModeLabel() {
+  const billing = state.capabilities?.billing;
+  if (!billing) return state.plansBillingMode || "checking";
+  if (!billing.available) return billing.mode || "not configured";
+  return billing.production_billing ? "Stripe billing ready" : billing.mode || "limited billing";
+}
+
+function currentUserEmail() {
+  return state.authUser?.email || state.authEmail || state.demoUser || "";
 }
 
 function selectedVoice() {
@@ -290,11 +395,19 @@ async function refreshStatus() {
   state.voiceLoading = true;
   state.error = "";
   state.videoError = "";
+  state.billingError = "";
   render();
 
   try {
     const client = getClient();
-    const [readiness, voiceResponse] = await Promise.allSettled([client.readiness(), client.voices()]);
+    const [readiness, voiceResponse, capabilities, plans, me, subscription] = await Promise.allSettled([
+      client.readiness(),
+      client.voices(),
+      client.productCapabilities(),
+      client.productPlans(),
+      state.sessionToken ? client.me() : Promise.resolve(null),
+      state.sessionToken ? client.subscriptionStatus() : Promise.resolve(null)
+    ]);
 
     if (readiness.status === "fulfilled") {
       state.readiness = readiness.value;
@@ -309,6 +422,25 @@ async function refreshStatus() {
       if (!vietnameseVoices().some((voice) => voice.name === state.videoTargetVoiceName)) {
         state.videoTargetVoiceName = vietnameseVoices()[0]?.name || fallbackVoices[2].name;
       }
+    }
+
+    if (capabilities.status === "fulfilled") {
+      state.capabilities = capabilities.value;
+    }
+
+    if (plans.status === "fulfilled" && plans.value.plans.length) {
+      state.plans = plans.value.plans;
+      state.plansBillingMode = plans.value.billing?.production_billing ? "production billing" : plans.value.billing?.mode || "pricing copy only";
+    }
+
+    if (me.status === "fulfilled" && me.value) {
+      state.authUser = normalizeAuthResponse(me.value).user;
+    }
+
+    if (subscription.status === "fulfilled" && subscription.value) {
+      state.subscription = subscription.value;
+    } else if (subscription.status === "rejected" && state.capabilities?.billing?.available) {
+      state.billingError = `${formatError(subscription.reason)} Subscription status is not available yet.`;
     }
 
     const rejected = [readiness, voiceResponse].find((result) => result.status === "rejected");
@@ -393,6 +525,128 @@ async function synthesize() {
     state.synthLoading = false;
     render();
   }
+}
+
+async function submitAuth(email: string, password: string) {
+  state.authLoading = true;
+  state.authError = "";
+  render();
+
+  try {
+    const response = state.authMode === "register" ? await getClient().register(email, password) : await getClient().login(email, password);
+    const normalized = normalizeAuthResponse(response);
+    if (!normalized.token) {
+      throw new ApiError("Auth endpoint did not return a session token.");
+    }
+    saveSession(normalized.token, email);
+    state.authUser = normalized.user || { email };
+    state.demoUser = normalized.user?.email || email;
+    localStorage.setItem(storageKeys.demoUser, state.demoUser);
+    state.showAuthPanel = false;
+    state.billingMessage = state.capabilities?.auth?.production_identity
+      ? "Signed in."
+      : "Signed in through the current demo identity service. Production auth is still not configured.";
+    await refreshStatus();
+  } catch (error) {
+    state.authError = `${formatError(error)} ${state.capabilities?.auth?.available === false ? "Auth is not configured on this backend." : "Check backend auth configuration."}`;
+    render();
+  } finally {
+    state.authLoading = false;
+    render();
+  }
+}
+
+async function logout() {
+  state.authLoading = true;
+  state.authError = "";
+  render();
+
+  try {
+    if (state.sessionToken) {
+      await getClient().logout();
+    }
+  } catch (error) {
+    state.authError = formatError(error);
+  } finally {
+    saveSession("");
+    state.authUser = null;
+    state.demoUser = "";
+    state.subscription = null;
+    localStorage.removeItem(storageKeys.demoUser);
+    state.authLoading = false;
+    render();
+  }
+}
+
+async function startCheckout(planId: string) {
+  if (!state.sessionToken) {
+    state.authMode = "register";
+    state.showAuthPanel = true;
+    state.billingMessage = "Create an account before selecting a paid tier.";
+    render();
+    return;
+  }
+
+  if (!billingAvailable()) {
+    state.billingError = "Stripe Checkout is not configured on this backend yet. Pricing is visible, but plan purchase is disabled.";
+    render();
+    return;
+  }
+
+  state.billingLoading = true;
+  state.billingError = "";
+  state.billingMessage = "";
+  render();
+
+  try {
+    const response = await getClient().createCheckoutSession(planId);
+    const url = checkoutUrl(response);
+    if (!url) {
+      throw new ApiError("Checkout endpoint did not return a redirect URL.");
+    }
+    window.location.assign(url);
+  } catch (error) {
+    state.billingError = formatError(error);
+    state.billingLoading = false;
+    render();
+  }
+}
+
+async function openBillingPortal() {
+  if (!state.sessionToken) {
+    state.authMode = "login";
+    state.showAuthPanel = true;
+    state.billingMessage = "Login before opening account billing.";
+    render();
+    return;
+  }
+
+  if (!billingAvailable()) {
+    state.billingError = "Billing portal is not configured yet. The backend capabilities endpoint reports billing as unavailable.";
+    render();
+    return;
+  }
+
+  state.billingLoading = true;
+  state.billingError = "";
+  render();
+
+  try {
+    const response = await getClient().createBillingPortalSession();
+    const url = response.url || response.portal_url || "";
+    if (!url) {
+      throw new ApiError("Billing portal endpoint did not return a redirect URL.");
+    }
+    window.location.assign(url);
+  } catch (error) {
+    state.billingError = formatError(error);
+    state.billingLoading = false;
+    render();
+  }
+}
+
+function checkoutUrl(response: CheckoutSessionResponse) {
+  return response.url || response.checkout_url || "";
 }
 
 async function startVideoLocalization() {
@@ -609,36 +863,50 @@ function render() {
         <a href="#docs">Docs</a>
       </nav>
       <div class="nav-actions">
-        <button class="ghost-button" id="login-button" type="button">Login</button>
-        <button class="nav-signup" id="signup-button" type="button">Sign up</button>
+        ${
+          state.sessionToken
+            ? `<button class="ghost-button" id="account-button" type="button">Account</button><button class="nav-signup" id="portal-button" type="button" ${billingAvailable() ? "" : "disabled"}>Billing</button>`
+            : `<button class="ghost-button" id="login-button" type="button">Login</button><button class="nav-signup" id="signup-button" type="button">Sign up</button>`
+        }
       </div>
     </header>
 
     <main>
-      <section id="prototype" class="studio-stage" aria-labelledby="hero-title">
-        <div class="studio-intro">
+      <section id="prototype" class="studio-stage command-center" aria-labelledby="hero-title">
+        <div class="studio-intro hero-console">
           <div>
-            <p class="eyebrow">Production voice workspace</p>
-            <h1 id="hero-title">Generate, review, and ship synthetic voice from one console.</h1>
+            <p class="eyebrow">Live production console</p>
+            <h1 id="hero-title">Voice AI studio for real voice output and Vietnamese-aware dubbing.</h1>
             <p class="hero-lede">
-              The first screen is the product: backend status, script input, voice controls, generation, playback, download, and a visible path into Vietnamese video localization.
+              Turn a script or source video into a reviewable delivery package: real voice audio, Vietnamese script, timed subtitles, dubbed track, final media, and provider readiness in one workspace.
             </p>
+            <div class="signal-strip" aria-label="Production signals">
+              <span>Real voice preview</span>
+              <span>Vietnamese script review</span>
+              <span>Subtitle and voice package</span>
+              <span>Provider readiness</span>
+            </div>
           </div>
           <div class="status-rail" aria-label="Live studio status">
             <article>
-              <span>API</span>
+              <span>Live TTS</span>
               <strong>${escapeHtml(readinessLabel)}</strong>
+              <small>${escapeHtml(provider?.name || "provider check pending")}</small>
+            </article>
+            <article>
+              <span>Video localization</span>
+              <strong>VI package</strong>
+              <small>script, SRT, audio, MP4</small>
+            </article>
+            <article>
+              <span>Auth and billing</span>
+              <strong>${escapeHtml(authModeLabel())}</strong>
+              <small>${escapeHtml(billingModeLabel())}</small>
+            </article>
+            <article>
+              <span>Artifact exports</span>
+              <strong>${state.history.length + state.videoHistory.length} local jobs</strong>
               <small>${escapeHtml(state.baseUrl)}</small>
-            </article>
-            <article>
-              <span>Provider</span>
-              <strong>${escapeHtml(provider?.name || "checking")}</strong>
-              <small>${provider?.fallback ? "fallback route visible" : "OpenAI path when ready"}</small>
-            </article>
-            <article>
-              <span>Workflows</span>
-              <strong>TTS + video</strong>
-              <small>Video upload opens from the tab below</small>
             </article>
             <button
               class="secondary-button"
@@ -654,13 +922,14 @@ function render() {
         <section id="studio" class="studio-shell" aria-label="Prototype workspace" data-testid="prototype-studio">
           <div class="studio-toolbar">
             <div>
-              <span class="mini-label">Live studio</span>
-              <strong>${state.demoUser ? escapeHtml(state.demoUser) : "Public workspace"}</strong>
+              <span class="mini-label">Session console</span>
+              <strong>${currentUserEmail() ? escapeHtml(currentUserEmail()) : "Public workspace"}</strong>
             </div>
-            <div class="studio-stats" aria-label="Prototype status summary">
+            <div class="studio-stats signal-strip" aria-label="Prototype status summary">
               <span>${state.voices.length.toLocaleString()} voices loaded</span>
-              <span>Target Vietnamese</span>
-              <span>Audio/video artifacts</span>
+              <span>Vietnamese target</span>
+              <span>Script, subtitle, voice, MP4</span>
+              <span>${escapeHtml(billingModeLabel())}</span>
             </div>
             <button
               class="secondary-button mobile-video-shortcut"
@@ -694,12 +963,13 @@ function render() {
             <button id="workflow-video" class="${state.activeWorkflow === "video" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.activeWorkflow === "video"}" aria-controls="workflow-panel" aria-label="Video localization" data-testid="workflow-video-localization-tab">Video localization</button>
           </div>
 
-          <div id="workflow-panel" class="workspace-grid" role="tabpanel" aria-labelledby="${state.activeWorkflow === "video" ? "workflow-video" : "workflow-tts"}">
+          <div id="workflow-panel" class="workspace-grid workflow-lanes" role="tabpanel" aria-labelledby="${state.activeWorkflow === "video" ? "workflow-video" : "workflow-tts"}">
             <div class="composer-panel">
               ${state.activeWorkflow === "video" ? videoFormMarkup() : ttsFormMarkup()}
             </div>
             <aside class="result-panel" aria-label="Output, status, and history">
               ${state.activeWorkflow === "video" ? videoOutputMarkup() : ttsOutputMarkup()}
+              ${accountBillingMarkup()}
               ${backendStatusMarkup(provider)}
               ${historyMarkup()}
             </aside>
@@ -707,14 +977,15 @@ function render() {
         </section>
       </section>
 
-      <section id="product" class="content-section product-grid">
+      <section id="product" class="content-section product-grid signal-strip-section">
         <div>
           <p class="eyebrow">Product-led voice creation</p>
-          <h2>Built for teams that need fast, reviewable voice output before committing to a production pipeline.</h2>
+          <h2>A compact production desk for voice checks, Vietnamese localization review, and usage control.</h2>
         </div>
-        ${featureCard("01", "Immediate voice test", "The top screen is the working TTS flow: script, provider status, voice controls, generation, playback, and download.")}
-        ${featureCard("02", "Localization path", "Video upload, transcript, SRT, dubbed audio, and final MP4 review stay available as the next workflow instead of replacing TTS.")}
-        ${featureCard("03", "Studio and API posture", "Content teams get a usable product surface while developers keep the backend-configured API base and request metadata.")}
+        ${featureCard("01", "Live TTS", "Script input, voice direction, spend-aware limits, provider status, playback, and download stay in the same production lane.")}
+        ${featureCard("02", "Video localization", "Upload, transcription, Vietnamese script, SRT, dubbed audio, and final MP4 follow a visible review pipeline.")}
+        ${featureCard("03", "Auth and billing", "Pricing tiers, usage minutes, account state, Checkout readiness, and entitlements remain visible before purchase actions unlock.")}
+        ${featureCard("04", "Artifact exports", "Every accepted job surfaces the script, subtitle, voice, request metadata, and media outputs the backend can publish.")}
       </section>
 
       <section id="workflow" class="content-section workflow-explainer">
@@ -723,36 +994,43 @@ function render() {
           <h2>From text preview to Vietnamese delivery package.</h2>
         </div>
         <ol class="step-list">
-          <li><span>1</span><strong>Write</strong><p>Paste a script, select text or SSML mode, and keep character limits visible.</p></li>
-          <li><span>2</span><strong>Tune</strong><p>Choose voice, language, format, speaking rate, pitch, and gain before spending a request.</p></li>
-          <li><span>3</span><strong>Generate</strong><p>Create a voiceover with clear provider metadata, loading state, and inline errors.</p></li>
-          <li><span>4</span><strong>Export</strong><p>Download transcript, SRT, audio, and final MP4 when the backend publishes artifacts.</p></li>
+          <li><span>01</span><strong>Compose</strong><p>Paste the script or upload a source clip, then keep limits and readiness visible before spending a request.</p></li>
+          <li><span>02</span><strong>Direct</strong><p>Select voice, language, format, speaking rate, pitch, gain, source language, and Vietnamese target voice.</p></li>
+          <li><span>03</span><strong>Review</strong><p>Listen, inspect transcript and subtitle previews, then check latency, provider, request ID, and MLflow metadata.</p></li>
+          <li><span>04</span><strong>Deliver</strong><p>Export audio, Vietnamese transcript, SRT, VTT, dubbed track, and final MP4 as backend artifacts arrive.</p></li>
         </ol>
       </section>
 
       <section id="pricing" class="content-section">
         <div class="section-kicker">
           <p class="eyebrow">Pricing</p>
-          <h2>Transparent tiers for prototype, creator, studio, and enterprise use.</h2>
+          <h2>Usage minutes, account state, and available actions stay visible.</h2>
+          <p class="pricing-note">${escapeHtml(billingAvailable() ? "Stripe Checkout is available from this backend. Paid plans can be selected from the active session." : "Billing is not configured yet. Plans show product packaging and usage minutes, but purchase actions stay disabled until Stripe Checkout is exposed.")}</p>
         </div>
         <div class="pricing-grid">
-          ${pricingCard("Free Demo", "$0", "Prototype testing", ["Short TTS previews", "Video UI demo states", "Synthetic voice disclosure included"])}
-          ${pricingCard("Creator", "$29", "Solo production", ["Monthly voice minutes", "Transcript and SRT downloads", "Commercial rights subject to provider terms"])}
-          ${pricingCard("Studio", "$149", "Team localization", ["Workspace history", "Batch review workflow", "Priority render queue when backend supports it"])}
-          ${pricingCard("Enterprise", "Custom", "Security and scale", ["Backend-managed credentials", "Private deployment options", "Audit logs, Cloud logs, and MLflow observability"])}
+          ${state.plans.map(pricingCard).join("")}
+          ${pricingCard({
+            id: "enterprise-contact",
+            name: "Enterprise",
+            monthly_price_usd: null,
+            features: ["Private deployment", "Security review", "Custom localization minutes and support"],
+            demo_only: true
+          })}
         </div>
+        ${state.billingError ? `<div class="error-banner billing-alert" role="alert">${escapeHtml(state.billingError)}</div>` : ""}
+        ${state.billingMessage ? `<div class="success-banner billing-alert" role="status">${escapeHtml(state.billingMessage)}</div>` : ""}
       </section>
 
       <section id="security" class="content-section trust-grid">
         <div>
           <p class="eyebrow">Trust and security</p>
           <h2>Designed around backend-owned secrets and observable processing.</h2>
-          <p>The browser never receives OpenAI, Google, or cloud provider keys. Optional backend API keys are session-only and are not persisted.</p>
+          <p>The browser never receives provider secrets. Optional backend API keys are session-only and are not persisted.</p>
         </div>
-        ${trustItem("Creators", "Preview dubs and subtitles before publishing campaign or education videos.")}
-        ${trustItem("Education", "Localize lessons and training clips while keeping script review visible.")}
+        ${trustItem("Content teams", "Preview scripts, voices, and generated audio before publishing.")}
+        ${trustItem("Education", "Localize lessons and training clips while keeping Vietnamese script review visible.")}
         ${trustItem("Sales teams", "Adapt product walkthroughs for Vietnamese prospects without manual media assembly.")}
-        ${trustItem("Agencies", "Track source file, status, voice, and artifacts for client localization jobs.")}
+        ${trustItem("Agencies", "Track source file, status, voice, request IDs, and artifacts for client localization jobs.")}
       </section>
 
       <section id="docs" class="content-section docs-panel">
@@ -779,13 +1057,27 @@ function ttsFormMarkup() {
   return `
     <form id="synthesis-form" class="synthesis-form" aria-label="Synthesize speech">
       <div class="prototype-header">
-        <span class="mini-label">Working first-screen workflow</span>
+        <span class="mini-label">Live TTS lane</span>
         <h2>Text to real voice studio</h2>
-        <p>Generate speech with the current backend provider. OpenAI voices are synthetic; disclose AI-generated audio to listeners where required.</p>
+        <p>Create studio-grade voice output from text or SSML while provider readiness, request limits, playback, and downloads stay attached to the script.</p>
       </div>
-      <div class="mode-row" role="radiogroup" aria-label="Input mode">
-        <label><input type="radio" name="mode" value="text" ${state.mode === "text" ? "checked" : ""} /> Plain text</label>
-        <label><input type="radio" name="mode" value="ssml" ${state.mode === "ssml" ? "checked" : ""} /> SSML</label>
+      <div class="prompt-dock">
+        <div class="prompt-dock-header">
+          <div class="mode-row" role="radiogroup" aria-label="Input mode">
+            <label><input type="radio" name="mode" value="text" ${state.mode === "text" ? "checked" : ""} /> Plain text</label>
+            <label><input type="radio" name="mode" value="ssml" ${state.mode === "ssml" ? "checked" : ""} /> SSML</label>
+          </div>
+          <span id="character-count">${charCount.toLocaleString()} / 5,000 characters</span>
+        </div>
+        <label class="field prompt-field transcript-stack">
+          <span>${state.mode === "ssml" ? "SSML input" : "Script input"}</span>
+          <textarea id="text-input" maxlength="5000" rows="7">${escapeHtml(state.text)}</textarea>
+        </label>
+        ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ""}
+        <div class="action-row action-row-primary">
+          <button class="primary-button" type="submit" data-testid="generate-tts-preview" ${state.synthLoading ? "disabled" : ""}>${state.synthLoading ? "Synthesizing..." : "Generate TTS preview"}</button>
+          <p class="request-note">No autoplay. Playback, duration, provider metadata, and download appear when the backend returns an artifact.</p>
+        </div>
       </div>
       <div class="control-grid">
         <label class="field"><span>Voice</span><select id="voice-select">${state.voices
@@ -799,17 +1091,7 @@ function ttsFormMarkup() {
           .join("")}</select></label>
         <label class="field"><span>Client reference</span><input id="client-reference-id" type="text" value="${escapeHtml(state.clientReferenceId)}" placeholder="script-123" /></label>
       </div>
-      ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ""}
-      <div class="action-row action-row-primary">
-        <button class="primary-button" type="submit" data-testid="generate-tts-preview" ${state.synthLoading ? "disabled" : ""}>${state.synthLoading ? "Synthesizing..." : "Generate TTS preview"}</button>
-        <p class="request-note">Native audio controls, no autoplay, downloadable when backend returns an artifact.</p>
-      </div>
-      <label class="field">
-        <span>${state.mode === "ssml" ? "SSML input" : "Script input"}</span>
-        <textarea id="text-input" maxlength="5000" rows="5">${escapeHtml(state.text)}</textarea>
-        <small id="character-count">${charCount.toLocaleString()} / 5,000 characters</small>
-      </label>
-      <div class="voice-disclosure" role="note">
+      <div class="voice-disclosure signal-strip" role="note">
         <strong>AI voice disclosure</strong>
         <span>Generated audio uses synthetic voice technology. Keep consent, labeling, and commercial usage rules visible in your publishing workflow.</span>
       </div>
@@ -829,14 +1111,14 @@ function videoFormMarkup() {
   return `
     <form id="video-form" class="synthesis-form" aria-label="Localize video to Vietnamese">
       <div class="prototype-header">
-        <span class="mini-label">Core test flow</span>
+        <span class="mini-label">Vietnamese dubbing lane</span>
         <h2>Video to Vietnamese studio</h2>
-        <p>Start here. Upload a source clip, choose the language and Vietnamese voice, then inspect the translation package before final export.</p>
+        <p>Upload an English or Chinese source clip, then package Vietnamese script, timed subtitles, dubbed voice, and final video for review.</p>
       </div>
-      <label class="field file-field command-upload">
+      <label class="field file-field command-upload hero-console">
         <span>Source video</span>
         <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/*" aria-label="Source video" aria-describedby="video-file-help" data-testid="video-file-input" />
-        <strong>${selectedFile ? escapeHtml(selectedFile.name) : "Drop a Chinese or English video into the localization queue"}</strong>
+        <strong>${selectedFile ? escapeHtml(selectedFile.name) : "Drop an English or Chinese video into the localization queue"}</strong>
         <small id="video-file-help">${selectedFile ? `${formatNumber(selectedFile.size, " bytes")} selected. Start localization when ready.` : "MP4, MOV, M4V, or WebM up to 250 MB. Use short clips for the fastest acceptance pass."}</small>
       </label>
       <div class="control-grid video-controls">
@@ -846,7 +1128,7 @@ function videoFormMarkup() {
           <option value="zh-CN" ${state.videoSourceLanguage === "zh-CN" ? "selected" : ""}>Chinese (Simplified)</option>
           <option value="zh" ${state.videoSourceLanguage === "zh" ? "selected" : ""}>Chinese</option>
         </select></label>
-        <label class="field"><span>Target</span><input type="text" value="Vietnamese script, SRT, dub, MP4" disabled /></label>
+        <label class="field"><span>Target package</span><input type="text" value="Vietnamese script, SRT, dub, MP4" disabled /></label>
         <label class="field"><span>Vietnamese voice</span><select id="video-target-voice">${voices
           .map((voice) => `<option value="${escapeHtml(voice.name)}" ${voice.name === selectedVideoVoice().name ? "selected" : ""}>${escapeHtml(voiceLabel(voice))}</option>`)
           .join("")}</select></label>
@@ -854,13 +1136,13 @@ function videoFormMarkup() {
       </div>
       <label class="check-row">
         <input id="video-burn-subtitles" type="checkbox" ${state.videoBurnSubtitles ? "checked" : ""} />
-        Burn Vietnamese subtitles into final video when backend supports rendering
+        Burn Vietnamese subtitles into the final video when backend rendering is available
       </label>
       ${state.videoError ? `<div class="error-banner" role="alert">${escapeHtml(state.videoError)}</div>` : ""}
       <div class="action-row">
         <button class="primary-button" type="submit" aria-label="Start Vietnamese localization" data-testid="start-video-localization" ${state.videoLoading ? "disabled" : ""}>${state.videoLoading ? "Starting localization..." : "Start Vietnamese localization"}</button>
       </div>
-      <div class="pipeline-preview" aria-label="Localization pipeline stages">
+      <div class="pipeline-preview workflow-lanes" aria-label="Localization pipeline stages">
         ${pipelineStepsMarkup(state.videoJob?.stage)}
       </div>
     </form>
@@ -869,14 +1151,14 @@ function videoFormMarkup() {
 
 function ttsOutputMarkup() {
   return `
-    <section class="panel-section">
-      <div class="section-heading"><h2>TTS output</h2><span>${state.latest?.status || "No job yet"}</span></div>
+    <section class="panel-section hero-console">
+      <div class="section-heading"><h2>Live TTS output</h2><span>${state.latest?.status || "No job yet"}</span></div>
       ${
         state.synthLoading
           ? skeletonOutput()
           : state.latest
             ? outputMarkup()
-            : `<div class="empty-state"><p>No audio yet. Paste text, choose a voice, and generate a preview to see the player and download link here.</p></div>`
+            : `<div class="empty-state"><p>No audio yet. Paste a script, choose a voice, and generate a preview to see playback, provider metadata, and download here.</p></div>`
       }
     </section>
   `;
@@ -907,8 +1189,8 @@ function videoOutputMarkup() {
   const jobError = typeof job?.error === "string" ? job.error : job?.error?.message;
   const warnings = [...(job?.warnings || []), ...(job?.observability?.warnings || [])];
   return `
-    <section class="panel-section">
-      <div class="section-heading"><h2>Localization output</h2><span>${escapeHtml(job?.status || "Ready to test")}</span></div>
+    <section class="panel-section hero-console">
+      <div class="section-heading"><h2>Video localization output</h2><span>${escapeHtml(job?.status || "Ready to test")}</span></div>
       ${
         state.videoLoading
           ? skeletonOutput()
@@ -921,7 +1203,7 @@ function videoOutputMarkup() {
                 <div class="agent-plan" aria-label="Processing plan">
                   ${pipelineStepsMarkup(job.stage)}
                 </div>
-                <div class="artifact-grid">
+                <div class="artifact-grid signal-strip">
                   ${downloadButton("Transcript", artifacts.transcript)}
                   ${downloadButton("SRT", artifacts.srt)}
                   ${downloadButton("VTT", artifacts.vtt)}
@@ -930,8 +1212,10 @@ function videoOutputMarkup() {
                 </div>
                 ${artifacts.audio ? `<audio controls preload="metadata" src="${escapeAttribute(artifacts.audio)}">Your browser does not support audio playback.</audio>` : ""}
                 ${artifacts.video ? `<video controls preload="metadata" src="${escapeAttribute(artifacts.video)}">Your browser does not support video playback.</video>` : `<div class="video-placeholder">Final video preview appears here when the backend publishes MP4 output.</div>`}
-                <label class="field"><span>Vietnamese script preview</span><textarea id="video-script-editor" rows="6" placeholder="Vietnamese script appears here after transcription and translation." ${scriptEditable ? "" : "readonly"}>${escapeHtml(state.videoScript)}</textarea></label>
-                <label class="field"><span>Vietnamese SRT preview</span><textarea id="video-srt-editor" rows="6" placeholder="Timed Vietnamese subtitles appear here." ${scriptEditable ? "" : "readonly"}>${escapeHtml(state.videoSrt)}</textarea></label>
+                <div class="transcript-stack">
+                  <label class="field"><span>Vietnamese script preview</span><textarea id="video-script-editor" rows="6" placeholder="Vietnamese script appears here after transcription and translation." ${scriptEditable ? "" : "readonly"}>${escapeHtml(state.videoScript)}</textarea></label>
+                  <label class="field"><span>Vietnamese SRT preview</span><textarea id="video-srt-editor" rows="6" placeholder="Timed Vietnamese subtitles appear here." ${scriptEditable ? "" : "readonly"}>${escapeHtml(state.videoSrt)}</textarea></label>
+                </div>
                 <dl class="metadata-list">
                   <div><dt>Job ID</dt><dd data-testid="video-job-id">${escapeHtml(job.job_id)}</dd></div>
                   <div><dt>Source</dt><dd>${escapeHtml(job.source_language || state.videoSourceLanguage)}</dd></div>
@@ -942,7 +1226,7 @@ function videoOutputMarkup() {
                   <div><dt>MLflow</dt><dd>${escapeHtml(job.observability?.mlflow_run_id || "Not reported")}</dd></div>
                 </dl>
               </div>`
-            : `<div class="empty-state"><p>Upload a short Chinese or English video to inspect backend progress, Vietnamese previews, media players, and download links here.</p></div>`
+            : `<div class="empty-state"><p>Upload a short English or Chinese video to inspect backend progress, Vietnamese previews, media players, and download links here.</p></div>`
       }
     </section>
   `;
@@ -950,10 +1234,12 @@ function videoOutputMarkup() {
 
 function backendStatusMarkup(provider?: { name?: string; ready?: boolean; fallback?: boolean }) {
   return `
-    <section class="panel-section compact">
-      <div class="section-heading"><h2>Backend status</h2><button class="text-button" id="status-refresh" type="button">Check</button></div>
+    <section class="panel-section compact proof-panel provider-readiness">
+      <div class="section-heading"><h2>Provider readiness</h2><button class="text-button" id="status-refresh" type="button">Check</button></div>
       <dl class="metadata-list">
         <div><dt>Provider</dt><dd>${escapeHtml(provider?.name || "Fallback/demo")}${provider?.fallback ? " (fallback)" : ""}</dd></div>
+        <div><dt>Auth</dt><dd>${escapeHtml(authModeLabel())}</dd></div>
+        <div><dt>Billing</dt><dd>${escapeHtml(billingModeLabel())}</dd></div>
         <div><dt>Provider ready</dt><dd>${provider?.ready === undefined ? "Unknown" : provider.ready ? "Yes" : "No"}</dd></div>
         <div><dt>Storage</dt><dd>${escapeHtml(state.readiness?.storage?.mode || "Unknown")} ${state.readiness?.storage?.ready === false ? "(not ready)" : ""}</dd></div>
         <div><dt>MLflow</dt><dd>${state.readiness?.mlflow?.configured ? "Configured" : "Not configured"} ${state.readiness?.mlflow?.ready === false ? "(not ready)" : ""}</dd></div>
@@ -962,19 +1248,56 @@ function backendStatusMarkup(provider?: { name?: string; ready?: boolean; fallba
   `;
 }
 
+function accountBillingMarkup() {
+  const email = currentUserEmail();
+  const subscriptionStatus = state.subscription?.status || state.authUser?.subscription_status || "No active subscription";
+  const planId = state.subscription?.plan_id || state.authUser?.plan_id || "No plan selected";
+  const entitlementStatus = state.subscription?.entitlement_status || (state.subscription?.entitlements ? "Entitlements returned" : "No entitlement payload");
+  return `
+    <section class="panel-section compact account-panel proof-panel" aria-label="Account and billing">
+      <div class="section-heading">
+        <h2>Auth and billing</h2>
+        <span>${escapeHtml(billingModeLabel())}</span>
+      </div>
+      ${
+        email
+          ? `<dl class="metadata-list">
+              <div><dt>Signed in</dt><dd>${escapeHtml(email)}</dd></div>
+              <div><dt>Identity</dt><dd>${escapeHtml(authModeLabel())}</dd></div>
+              <div><dt>Plan</dt><dd>${escapeHtml(planId)}</dd></div>
+              <div><dt>Subscription</dt><dd>${escapeHtml(subscriptionStatus)}</dd></div>
+              <div><dt>Entitlements</dt><dd>${escapeHtml(entitlementStatus)}</dd></div>
+            </dl>
+            <div class="account-actions">
+              <button class="secondary-button" id="account-refresh" type="button" ${state.authLoading ? "disabled" : ""}>Refresh session</button>
+              <button class="secondary-button" id="account-portal" type="button" ${billingAvailable() && !state.billingLoading ? "" : "disabled"}>Manage billing</button>
+              <button class="text-button" id="logout-button" type="button" ${state.authLoading ? "disabled" : ""}>Logout</button>
+            </div>`
+          : `<div class="empty-state small"><p>Create an account to unlock plan selection, Checkout redirect, billing portal, and usage entitlement status.</p></div>
+            <div class="account-actions">
+              <button class="secondary-button" id="account-login" type="button">Login</button>
+              <button class="primary-button" id="account-signup" type="button">Sign up</button>
+            </div>`
+      }
+      ${state.billingError ? `<div class="error-banner" role="alert">${escapeHtml(state.billingError)}</div>` : ""}
+      ${state.billingMessage ? `<div class="success-banner" role="status">${escapeHtml(state.billingMessage)}</div>` : ""}
+    </section>
+  `;
+}
+
 function historyMarkup() {
   const isVideo = state.activeWorkflow === "video";
   return `
-    <section class="panel-section compact">
+    <section class="panel-section compact artifact-exports">
       <div class="section-heading">
-        <h2>${isVideo ? "Video jobs" : "TTS history"}</h2>
+        <h2>${isVideo ? "Artifact exports" : "TTS history"}</h2>
         <button class="text-button" id="clear-history" type="button" ${isVideo ? (state.videoHistory.length ? "" : "disabled") : state.history.length ? "" : "disabled"}>Clear</button>
       </div>
       ${
         isVideo
           ? state.videoHistory.length
             ? `<ol class="history-list">${state.videoHistory.map(videoHistoryItem).join("")}</ol>`
-            : `<div class="empty-state small"><p>No video jobs in this browser yet.</p></div>`
+            : `<div class="empty-state small"><p>No video artifact packages in this browser yet.</p></div>`
           : state.history.length
             ? `<ol class="history-list">${state.history.map(historyItem).join("")}</ol>`
             : `<div class="empty-state small"><p>No TTS jobs in this browser yet.</p></div>`
@@ -1035,8 +1358,36 @@ function featureCard(index: string, title: string, body: string) {
   return `<article class="feature-card"><span>${index}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(body)}</p></article>`;
 }
 
-function pricingCard(name: string, price: string, subtitle: string, items: string[]) {
-  return `<article class="pricing-card"><h3>${escapeHtml(name)}</h3><strong>${escapeHtml(price)}</strong><p>${escapeHtml(subtitle)}</p><ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></article>`;
+function planPrice(plan: PricingPlan) {
+  if (typeof plan.monthly_price_usd === "number") {
+    return plan.monthly_price_usd === 0 ? "$0" : `$${plan.monthly_price_usd.toLocaleString()}`;
+  }
+  return "Custom";
+}
+
+function planFeatureLabel(feature: NonNullable<PricingPlan["features"]>[number]) {
+  return typeof feature === "string" ? feature : feature?.label || feature?.key || "Included feature";
+}
+
+function pricingCard(plan: PricingPlan) {
+  const features = plan.features?.length ? plan.features : ["Plan details are supplied by the backend."];
+  const disabled = !billingAvailable() || state.billingLoading || plan.id === "enterprise-contact";
+  const buttonText = billingAvailable() ? (plan.id === "enterprise-contact" ? "Contact sales" : "Choose plan") : "Checkout disabled";
+  const included = typeof plan.included_minutes === "number" ? `${plan.included_minutes.toLocaleString()} included minutes` : "Custom usage";
+  const overage =
+    typeof plan.overage_price_usd_per_minute === "number" ? `$${plan.overage_price_usd_per_minute.toFixed(2)} / extra minute` : "Usage terms pending";
+  const actionState = disabled ? "Action unavailable" : "Action available";
+  return `<article class="pricing-card usage-tier ${plan.recommended ? "is-recommended" : ""}">
+    <div class="plan-head">
+      <h3>${escapeHtml(plan.name)}</h3>
+      ${plan.recommended ? `<span>Recommended</span>` : plan.demo_only ? `<span>Demo</span>` : ""}
+    </div>
+    <strong>${escapeHtml(planPrice(plan))}</strong>
+    <p>${escapeHtml(included)} · ${escapeHtml(overage)}</p>
+    <ul>${features.map((item) => `<li>${escapeHtml(planFeatureLabel(item))}</li>`).join("")}</ul>
+    <p class="plan-action-state">${escapeHtml(actionState)} · ${escapeHtml(billingModeLabel())}</p>
+    <button class="primary-button plan-select" type="button" data-plan-id="${escapeAttribute(plan.id)}" ${disabled ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
+  </article>`;
 }
 
 function trustItem(title: string, body: string) {
@@ -1048,16 +1399,18 @@ function authPanelMarkup() {
     return "";
   }
   const isRegister = state.authMode === "register";
+  const authAvailable = state.capabilities?.auth?.available !== false;
   return `
     <div class="auth-backdrop" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-      <form id="auth-form" class="auth-card">
+      <form id="auth-form" class="auth-card" novalidate>
         <button class="auth-close" id="auth-close" type="button" aria-label="Close auth panel">Close</button>
-        <p class="eyebrow">Demo workspace</p>
-        <h2 id="auth-title">${isRegister ? "Create a demo account" : "Login to demo workspace"}</h2>
-        <p>No backend auth endpoint is documented yet. This creates a local demo identity only and stores no secrets.</p>
-        <label class="field"><span>Email</span><input id="auth-email" type="email" autocomplete="email" placeholder="you@company.com" required /></label>
-        <label class="field"><span>Password</span><input id="auth-password" type="password" autocomplete="${isRegister ? "new-password" : "current-password"}" placeholder="Not sent to backend in demo mode" required /></label>
-        <button class="primary-button" type="submit">${isRegister ? "Enter demo workspace" : "Login to demo"}</button>
+        <p class="eyebrow">${escapeHtml(authModeLabel())}</p>
+        <h2 id="auth-title">${isRegister ? "Create account" : "Login"}</h2>
+        <p>${authAvailable ? "Credentials are sent to the configured backend auth endpoint. Current capabilities will show whether this is production identity or demo identity." : "Auth is not configured on this backend."}</p>
+        ${state.authError ? `<div class="error-banner" id="auth-error" role="alert">${escapeHtml(state.authError)}</div>` : ""}
+        <label class="field"><span>Email</span><input id="auth-email" type="email" autocomplete="email" value="${escapeAttribute(state.authEmail)}" aria-describedby="${state.authError ? "auth-error" : ""}" required /></label>
+        <label class="field"><span>Password</span><input id="auth-password" type="password" autocomplete="${isRegister ? "new-password" : "current-password"}" minlength="8" aria-describedby="${state.authError ? "auth-error" : ""}" required /></label>
+        <button class="primary-button" type="submit" ${state.authLoading || !authAvailable ? "disabled" : ""}>${state.authLoading ? "Checking..." : isRegister ? "Create account" : "Login"}</button>
         <button class="text-button" id="auth-toggle" type="button">${isRegister ? "Use login instead" : "Create demo account"}</button>
       </form>
     </div>
@@ -1087,6 +1440,26 @@ function bindEvents() {
     state.showAuthPanel = true;
     render();
   });
+  document.querySelector<HTMLButtonElement>("#account-button")?.addEventListener("click", () => {
+    document.querySelector(".account-panel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  document.querySelector<HTMLButtonElement>("#portal-button")?.addEventListener("click", () => void openBillingPortal());
+  document.querySelector<HTMLButtonElement>("#account-login")?.addEventListener("click", () => {
+    state.authMode = "login";
+    state.showAuthPanel = true;
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#account-signup")?.addEventListener("click", () => {
+    state.authMode = "register";
+    state.showAuthPanel = true;
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#account-refresh")?.addEventListener("click", () => void refreshStatus());
+  document.querySelector<HTMLButtonElement>("#account-portal")?.addEventListener("click", () => void openBillingPortal());
+  document.querySelector<HTMLButtonElement>("#logout-button")?.addEventListener("click", () => void logout());
+  document.querySelectorAll<HTMLButtonElement>(".plan-select").forEach((button) => {
+    button.addEventListener("click", () => void startCheckout(button.dataset.planId || ""));
+  });
   document.querySelector<HTMLButtonElement>("#auth-close")?.addEventListener("click", () => {
     state.showAuthPanel = false;
     render();
@@ -1097,11 +1470,23 @@ function bindEvents() {
   });
   document.querySelector<HTMLFormElement>("#auth-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
-    const email = document.querySelector<HTMLInputElement>("#auth-email")?.value || "Demo user";
-    state.demoUser = email;
-    localStorage.setItem(storageKeys.demoUser, email);
-    state.showAuthPanel = false;
-    render();
+    const emailInput = document.querySelector<HTMLInputElement>("#auth-email");
+    const passwordInput = document.querySelector<HTMLInputElement>("#auth-password");
+    const email = emailInput?.value.trim() || "";
+    const password = passwordInput?.value || "";
+
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      state.authError = "Enter a valid email address.";
+      render();
+      return;
+    }
+    if (password.length < 8) {
+      state.authError = "Password must be at least 8 characters.";
+      render();
+      return;
+    }
+
+    void submitAuth(email, password);
   });
 
   document.querySelector<HTMLFormElement>("#settings-form")?.addEventListener("submit", (event) => {

@@ -25,6 +25,99 @@ export type ReadinessResponse = {
   mlflow?: { configured?: boolean; ready?: boolean };
 };
 
+export type ProductCapabilities = {
+  service?: string;
+  environment?: string;
+  mode?: string;
+  tts?: {
+    available?: boolean;
+    providers?: string[];
+    active_provider?: string;
+    encodings?: string[];
+    local_fallback?: boolean;
+  };
+  video_localization?: {
+    available?: boolean;
+    source_languages?: string[];
+    target_languages?: string[];
+    demo_mode?: boolean;
+    artifacts?: string[];
+    ffmpeg_available?: boolean;
+  };
+  auth?: {
+    available?: boolean;
+    mode?: string;
+    production_identity?: boolean;
+  };
+  billing?: {
+    available?: boolean;
+    mode?: string;
+    production_billing?: boolean;
+    checkout_available?: boolean;
+    portal_available?: boolean;
+    stripe_configured?: boolean;
+  };
+};
+
+export type PricingPlan = {
+  id: string;
+  name: string;
+  monthly_price_usd?: number | null;
+  included_minutes?: number | null;
+  overage_price_usd_per_minute?: number | null;
+  features?: Array<{ key?: string; label?: string } | string>;
+  demo_only?: boolean;
+  recommended?: boolean;
+};
+
+export type PlansResponse = {
+  plans: PricingPlan[];
+  billing?: {
+    production_billing?: boolean;
+    demo_only?: boolean;
+    mode?: string;
+  };
+};
+
+export type AuthUser = {
+  id?: string;
+  email?: string;
+  name?: string;
+  plan_id?: string;
+  subscription_status?: string;
+  entitlements?: Record<string, unknown>;
+};
+
+export type AuthResponse = {
+  access_token?: string;
+  token?: string;
+  session_token?: string;
+  token_type?: string;
+  expires_at?: string;
+  user?: AuthUser;
+};
+
+export type SubscriptionStatus = {
+  status?: string;
+  plan_id?: string;
+  current_period_end?: string;
+  entitlement_status?: string;
+  entitlements?: Record<string, unknown>;
+  customer_portal_available?: boolean;
+};
+
+export type CheckoutSessionResponse = {
+  url?: string;
+  checkout_url?: string;
+  session_id?: string;
+  status?: string;
+};
+
+export type BillingPortalResponse = {
+  url?: string;
+  portal_url?: string;
+};
+
 export type SynthesizeRequest = {
   text: string | null;
   ssml: string | null;
@@ -158,6 +251,7 @@ export type VideoLocalizationJob = {
 export type ApiClientOptions = {
   baseUrl: string;
   apiKey?: string;
+  sessionToken?: string;
 };
 
 export class ApiError extends Error {
@@ -257,10 +351,12 @@ const requestId = () => {
 export class VoiceAiClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
+  private readonly sessionToken?: string;
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey?.trim() || undefined;
+    this.sessionToken = options.sessionToken?.trim() || undefined;
   }
 
   async health() {
@@ -274,6 +370,60 @@ export class VoiceAiClient {
   async voices(languageCode?: string) {
     const query = languageCode ? `?language_code=${encodeURIComponent(languageCode)}` : "";
     return this.request<VoicesResponse>(`/v1/voices${query}`, true);
+  }
+
+  async productCapabilities() {
+    return this.request<ProductCapabilities>("/v1/product/capabilities", false);
+  }
+
+  async productPlans() {
+    return this.request<PlansResponse>("/v1/product/plans", false);
+  }
+
+  async register(email: string, password: string) {
+    return this.request<AuthResponse>("/v1/auth/register", false, {
+      method: "POST",
+      body: JSON.stringify({ email, password })
+    });
+  }
+
+  async login(email: string, password: string) {
+    return this.request<AuthResponse>("/v1/auth/login", false, {
+      method: "POST",
+      body: JSON.stringify({ email, password })
+    });
+  }
+
+  async me() {
+    return this.request<AuthResponse | AuthUser>("/v1/auth/me", true);
+  }
+
+  async logout() {
+    return this.request<{ status?: string }>("/v1/auth/logout", true, { method: "POST" });
+  }
+
+  async subscriptionStatus() {
+    return this.request<SubscriptionStatus>("/v1/billing/subscription", true);
+  }
+
+  async createCheckoutSession(planId: string) {
+    return this.request<CheckoutSessionResponse>("/v1/billing/checkout", true, {
+      method: "POST",
+      body: JSON.stringify({
+        plan_id: planId,
+        success_url: `${window.location.origin}${window.location.pathname}?checkout=success`,
+        cancel_url: `${window.location.origin}${window.location.pathname}?checkout=cancelled`
+      })
+    });
+  }
+
+  async createBillingPortalSession() {
+    return this.request<BillingPortalResponse>("/v1/billing/portal", true, {
+      method: "POST",
+      body: JSON.stringify({
+        return_url: `${window.location.origin}${window.location.pathname}?billing=returned`
+      })
+    });
   }
 
   async synthesize(payload: SynthesizeRequest, idempotencyKey?: string) {
@@ -313,8 +463,9 @@ export class VoiceAiClient {
     if (init.body && !(init.body instanceof FormData)) {
       headers.set("Content-Type", "application/json");
     }
-    if (authenticated && this.apiKey) {
-      headers.set("Authorization", `Bearer ${this.apiKey}`);
+    const credential = this.sessionToken || this.apiKey;
+    if (authenticated && credential) {
+      headers.set("Authorization", `Bearer ${credential}`);
     }
     headers.set("X-Request-ID", `web_${requestId()}`);
 
